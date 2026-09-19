@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.error
 import datetime
 import time
+import uuid
 import traceback
 from pathlib import Path
 
@@ -23,6 +24,7 @@ MEDIA_DIR = Path(os.path.expanduser("~/.gemini/media"))
 LOG_DIR = Path(os.path.expanduser("~/.gemini/logs"))
 AUDIT_LOG_PATH = LOG_DIR / "telegram_nexus.log"
 AUDIT_JSONL_PATH = LOG_DIR / "telegram_nexus.jsonl"
+JOB_REGISTRY_PATH = LOG_DIR / "telegram_jobs.json"
 
 def record_audit_event(event_type: str, actor: str, chat_id: str, action: str, details: dict = None):
     """
@@ -110,16 +112,96 @@ def telegram_api_call(method: str, params: dict = None) -> dict:
 def ensure_bot_commands():
     """Register official slash commands in Telegram bot UI."""
     commands = [
-        {"command": "start", "description": "Authenticate / view connection status"},
-        {"command": "spark", "description": "Log thought directly to Spark.md"},
-        {"command": "status", "description": "Check Motobook & Blaze telemetry"},
-        {"command": "strike", "description": "Check active tactical strikes"},
-        {"command": "help", "description": "View command guide & help"}
+        {"command": "genimage", "description": "Generate AI visual & deliver to phone"},
+        {"command": "gendoc", "description": "Generate document (.md/.txt) & send to phone"},
+        {"command": "gsuite", "description": "Query Gmail, Calendar, Drive & Docs"},
+        {"command": "strike", "description": "Query active tactical strikes"},
+        {"command": "task", "description": "Inspect campaigns & active operations"},
+        {"command": "job", "description": "Inspect active worker job tickets"},
+        {"command": "spark", "description": "Capture instant thought to Spark.md"},
+        {"command": "status", "description": "Check Motobook battery, RAM & bridge"},
+        {"command": "help", "description": "View executive command guide"}
     ]
     try:
         telegram_api_call("setMyCommands", {"commands": commands})
     except Exception:
         pass
+
+def send_telegram_file(method: str, file_param: str, file_path: Path, caption: str = "", chat_id: str = None) -> dict:
+    """Send local photo or document to Telegram Cloud API via multipart form with caption protection and HTML fallback."""
+    cfg = load_config()
+    token = cfg.get("bot_token")
+    if not token:
+        return {"ok": False, "description": "No bot token configured"}
+    target_chat_id = chat_id or cfg.get("owner_chat_id")
+    if not target_chat_id:
+        return {"ok": False, "description": "No target chat ID configured"}
+    
+    if not file_path.exists():
+        return {"ok": False, "description": f"File not found: {file_path}"}
+        
+    overflow_text = None
+    if caption and len(caption) > 1000:
+        split_idx = caption.rfind("\n", 0, 950)
+        if split_idx == -1:
+            split_idx = 950
+        overflow_text = caption[split_idx:].strip()
+        caption = caption[:split_idx] + "...\n<i>(Continued in next message)</i>"
+        
+    def build_and_send(include_html=True):
+        boundary = "----WebKitFormBoundary" + uuid.uuid4().hex
+        parts = []
+        
+        def add_field(name, value):
+            parts.append(f"--{boundary}\r\n".encode("utf-8"))
+            parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+            parts.append(f"{value}\r\n".encode("utf-8"))
+            
+        add_field("chat_id", str(target_chat_id))
+        if caption:
+            add_field("caption", caption)
+            if include_html:
+                add_field("parse_mode", "HTML")
+            
+        filename = file_path.name
+        parts.append(f"--{boundary}\r\n".encode("utf-8"))
+        parts.append(f'Content-Disposition: form-data; name="{file_param}"; filename="{filename}"\r\n'.encode("utf-8"))
+        parts.append(b"Content-Type: application/octet-stream\r\n\r\n")
+        with open(file_path, "rb") as f:
+            parts.append(f.read())
+        parts.append(b"\r\n")
+        parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+        
+        payload = b"".join(parts)
+        url = f"https://api.telegram.org/bot{token}/{method}"
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "Content-Length": str(len(payload)),
+                "User-Agent": "Antigravity-Telegram-Nexus/1.0"
+            }
+        )
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        res = build_and_send(include_html=True)
+        if not res.get("ok") and "can't parse entities" in res.get("description", "").lower():
+            res = build_and_send(include_html=False)
+            
+        if res.get("ok"):
+            record_audit_event("OUTBOUND_FILE", "antigravity", str(target_chat_id), f"Sent {method}: {file_path.name}", {"caption_preview": caption[:60] if caption else ""})
+            if overflow_text:
+                time.sleep(0.3)
+                tool_send_alert({"chat_id": target_chat_id, "message": overflow_text})
+        else:
+            record_audit_event("OUTBOUND_FILE_ERROR", "antigravity", str(target_chat_id), f"Failed {method}: {file_path.name}", {"error": res.get("description")})
+        return res
+    except Exception as e:
+        record_audit_event("OUTBOUND_FILE_ERROR", "antigravity", str(target_chat_id), f"Exception {method}: {file_path.name}", {"error": str(e)})
+        return {"ok": False, "description": str(e)}
 
 def download_telegram_file(file_id: str, dest_path: Path) -> bool:
     """Download a file from Telegram Cloud API by file_id."""
@@ -200,8 +282,22 @@ def tool_configure(args: dict) -> dict:
         "owner_chat_id": cfg.get("owner_chat_id")
     }
 
+def send_single_message(chat_id: str, text: str, parse_mode: str = "HTML", disable_preview: bool = True) -> dict:
+    params = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": disable_preview
+    }
+    res = telegram_api_call("sendMessage", params)
+    # Automatic Plain-Text Fallback: If Telegram fails because of malformed HTML/tags, retry as plain text
+    if not res.get("ok") and "can't parse entities" in res.get("description", "").lower():
+        params.pop("parse_mode", None)
+        res = telegram_api_call("sendMessage", params)
+    return res
+
 def tool_send_alert(args: dict) -> dict:
-    """Send high-priority alert or notification to Karan's Telegram."""
+    """Send high-priority alert or notification to Karan's Telegram with auto-chunking (>4000 chars) and HTML fallback."""
     cfg = load_config()
     chat_id = args.get("chat_id") or cfg.get("owner_chat_id")
     if not chat_id:
@@ -209,20 +305,62 @@ def tool_send_alert(args: dict) -> dict:
     
     message = args.get("message", "")
     parse_mode = args.get("parse_mode", "HTML")
+    disable_preview = args.get("disable_preview", True)
     
-    params = {
-        "chat_id": chat_id,
-        "text": message,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": args.get("disable_preview", True)
-    }
-    res = telegram_api_call("sendMessage", params)
-    if res.get("ok"):
-        msg_id = res.get("result", {}).get("message_id")
-        record_audit_event("OUTBOUND_ALERT", "antigravity", str(chat_id), f"Sent alert #{msg_id}", {"preview": message[:100], "message_id": msg_id})
-    else:
-        record_audit_event("ALERT_FAILED", "antigravity", str(chat_id), f"Alert failed: {res.get('description')}")
-    return res
+    # 1. Single message path (<4000 chars)
+    if len(message) <= 4000:
+        res = send_single_message(chat_id, message, parse_mode, disable_preview)
+        if res.get("ok"):
+            msg_id = res.get("result", {}).get("message_id")
+            record_audit_event("OUTBOUND_ALERT", "antigravity", str(chat_id), f"Sent alert #{msg_id}", {"preview": message[:100], "message_id": msg_id})
+        else:
+            record_audit_event("ALERT_FAILED", "antigravity", str(chat_id), f"Alert failed: {res.get('description')}")
+        return res
+        
+    # 2. Auto-Chunking for Long Responses (>4000 chars)
+    chunks = []
+    curr = message
+    while len(curr) > 3900:
+        split_idx = curr.rfind("\n\n", 0, 3900)
+        if split_idx == -1:
+            split_idx = curr.rfind("\n", 0, 3900)
+        if split_idx == -1:
+            split_idx = 3900
+        chunks.append(curr[:split_idx].strip())
+        curr = curr[split_idx:].strip()
+    if curr:
+        chunks.append(curr)
+        
+    total_parts = len(chunks)
+    last_res = {"ok": False}
+    for i, chunk in enumerate(chunks, 1):
+        header = f"<b>[Part {i}/{total_parts}]</b>\n\n" if total_parts > 1 else ""
+        res = send_single_message(chat_id, header + chunk, parse_mode, disable_preview)
+        last_res = res
+        time.sleep(0.35)
+        
+    record_audit_event("OUTBOUND_ALERT_CHUNKED", "antigravity", str(chat_id), f"Sent {total_parts}-part chunked alert", {"total_chars": len(message)})
+    return last_res
+
+def tool_send_photo(args: dict) -> dict:
+    """Send an image or visual artifact to Telegram phone."""
+    photo_path_str = args.get("photo_path")
+    if not photo_path_str:
+        return {"ok": False, "error": "photo_path is required"}
+    p = Path(os.path.expanduser(photo_path_str))
+    caption = args.get("caption", "")
+    chat_id = args.get("chat_id")
+    return send_telegram_file("sendPhoto", "photo", p, caption, chat_id)
+
+def tool_send_document(args: dict) -> dict:
+    """Send a document (.md, .txt, .pdf, .csv, .json) to Telegram phone."""
+    doc_path_str = args.get("doc_path")
+    if not doc_path_str:
+        return {"ok": False, "error": "doc_path is required"}
+    p = Path(os.path.expanduser(doc_path_str))
+    caption = args.get("caption", "")
+    chat_id = args.get("chat_id")
+    return send_telegram_file("sendDocument", "document", p, caption, chat_id)
 
 def tool_poll_updates(args: dict) -> dict:
     """Fetch new messages from Telegram and auto-bind owner if /start detected."""
@@ -302,14 +440,85 @@ def tool_poll_updates(args: dict) -> dict:
             })
         
         is_owner = (chat_id == str(cfg.get("owner_chat_id", "")))
-        event_tag = "OWNER_INBOUND" if is_owner else "VISITOR_INBOUND"
+        if not is_owner:
+            record_audit_event(
+                "UNAUTHORIZED_ACCESS_BLOCKED",
+                sender_username or sender_name or "unknown",
+                chat_id,
+                f"Blocked unauthorized {media_type}",
+                {"text": text[:100], "update_id": up_id}
+            )
+            try:
+                telegram_api_call("sendMessage", {
+                    "chat_id": chat_id,
+                    "text": "⛔ <b>Access Denied</b>\nThis bot is a private sovereign Command & Control gateway restricted to personal workstation use only. Unauthorized messages are discarded.",
+                    "parse_mode": "HTML"
+                })
+            except Exception:
+                pass
+            continue
+
         record_audit_event(
-            event_tag,
-            sender_username or sender_name or ("owner" if is_owner else "visitor"),
+            "OWNER_INBOUND",
+            sender_username or sender_name or "owner",
             chat_id,
             f"Received {media_type}",
             {"text": text[:150], "media_type": media_type, "update_id": up_id, "file_id": file_id}
         )
+
+        # Visual Hints: Attach emoji reaction to message bubble & trigger typing header
+        msg_id = msg.get("message_id")
+        if msg_id and args.get("auto_react", True):
+            try:
+                telegram_api_call("setMessageReaction", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "reaction": [{"type": "emoji", "emoji": "⚡"}]
+                })
+            except Exception:
+                pass
+            try:
+                telegram_api_call("sendChatAction", {
+                    "chat_id": chat_id,
+                    "action": "typing"
+                })
+            except Exception:
+                pass
+
+        # Automatic Owner Media Intake (Photos, PDFs, Docs, Audio)
+        local_file_path = None
+        if file_id:
+            try:
+                MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+                now_ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                if media_type == "photo":
+                    fname = f"photo_{now_ts}_{file_id[:8]}.jpg"
+                elif media_type == "document":
+                    clean_name = "".join(c for c in file_name if c.isalnum() or c in "._- ")[:40]
+                    if not clean_name:
+                        clean_name = f"doc_{file_id[:8]}.bin"
+                    fname = f"{now_ts}_{clean_name}"
+                elif media_type in ("voice", "audio"):
+                    fname = f"voice_{now_ts}_{file_id[:8]}.ogg"
+                elif media_type == "video":
+                    fname = f"video_{now_ts}_{file_id[:8]}.mp4"
+                else:
+                    fname = f"media_{now_ts}_{file_id[:8]}.bin"
+                    
+                dest = MEDIA_DIR / fname
+                if download_telegram_file(file_id, dest):
+                    local_file_path = str(dest.resolve()).replace("\\", "/")
+                    if media_type == "photo":
+                        text = f"[📷 Photo: {local_file_path}] {caption}".strip()
+                    elif media_type == "document":
+                        text = f"[📄 Document ({dest.suffix}): {local_file_path}] {caption}".strip()
+                    elif media_type == "voice":
+                        text = f"[🎙️ Voice Note: {local_file_path} ({duration}s)]"
+                    elif media_type == "video":
+                        text = f"[🎥 Video: {local_file_path}] {caption}".strip()
+            except Exception as e:
+                record_audit_event("MEDIA_AUTO_DOWNLOAD_ERR", "system", chat_id, f"Auto download error: {str(e)}")
+
         processed_messages.append({
             "update_id": up_id,
             "chat_id": chat_id,
@@ -318,9 +527,10 @@ def tool_poll_updates(args: dict) -> dict:
             "text": text,
             "media_type": media_type,
             "file_id": file_id,
+            "local_file_path": local_file_path,
             "duration": duration,
             "date": msg.get("date"),
-            "is_owner": is_owner
+            "is_owner": True
         })
     
     if new_last_id > cfg.get("last_update_id", 0):
@@ -349,19 +559,7 @@ def tool_ingest_spark(args: dict) -> dict:
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
     new_spark_lines = [f"\n---", f"### {now_str} (via Telegram Nexus)"]
     for note in owner_notes:
-        mtype = note.get("media_type", "text")
-        fid = note.get("file_id", "")
-        if fid and mtype in ("voice", "photo", "document", "audio"):
-            ext = "oga" if mtype == "voice" else ("mp3" if mtype == "audio" else ("jpg" if mtype == "photo" else "bin"))
-            fname = f"{mtype}_{note.get('date', int(time.time()))}_{note.get('update_id')}.{ext}"
-            fdest = MEDIA_DIR / fname
-            downloaded = download_telegram_file(fid, fdest)
-            if downloaded:
-                new_spark_lines.append(f"* {note['text']} (saved: `~/.gemini/media/{fname}`)")
-            else:
-                new_spark_lines.append(f"* {note['text']}")
-        else:
-            new_spark_lines.append(f"* {note['text']}")
+        new_spark_lines.append(f"* {note.get('text', '')}")
     new_spark_lines.append("")
     
     SPARK_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -382,25 +580,6 @@ def tool_ingest_spark(args: dict) -> dict:
         "spark_file": str(SPARK_PATH),
         "notes": [n["text"] for n in owner_notes]
     }
-
-def tool_reply_visitor(args: dict) -> dict:
-    """Reply back to an outside visitor / collaborator via the bot."""
-    visitor_chat_id = args.get("visitor_chat_id")
-    message = args.get("message")
-    if not visitor_chat_id or not message:
-        return {"ok": False, "error": "visitor_chat_id and message are required."}
-    
-    params = {
-        "chat_id": visitor_chat_id,
-        "text": message,
-        "parse_mode": args.get("parse_mode", "HTML")
-    }
-    res = telegram_api_call("sendMessage", params)
-    if res.get("ok"):
-        record_audit_event("VISITOR_REPLY", "antigravity", str(visitor_chat_id), "Reply dispatched to visitor", {"preview": message[:100]})
-    else:
-        record_audit_event("REPLY_FAILED", "antigravity", str(visitor_chat_id), f"Failed to reply to visitor: {res.get('description')}")
-    return res
 
 def tool_get_audit_log(args: dict) -> dict:
     """Inspect the immutable audit log of all events, messages, and actions that passed through the bot."""
@@ -440,6 +619,223 @@ def tool_get_audit_log(args: dict) -> dict:
         "log_file": str(AUDIT_LOG_PATH),
         "jsonl_file": str(AUDIT_JSONL_PATH),
         "events": recent
+    }
+
+# -----------------------------------------------------------------------------
+# Asynchronous Job Ticket Engine (Master-Worker Queue)
+# -----------------------------------------------------------------------------
+
+def load_jobs() -> dict:
+    if JOB_REGISTRY_PATH.exists():
+        try:
+            with open(JOB_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_jobs(jobs: dict):
+    JOB_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(JOB_REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(jobs, f, indent=2, ensure_ascii=False)
+
+def tool_job_create(args: dict) -> dict:
+    """Create a new asynchronous job ticket for heavy worker delegation."""
+    task_desc = args.get("task", "Unnamed task")
+    jobs = load_jobs()
+    job_idx = len(jobs) + 1
+    job_id = f"JOB-{job_idx:02d}"
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+    job_data = {
+        "job_id": job_id,
+        "task": task_desc,
+        "status": "in_progress",
+        "assigned_to": args.get("assigned_to", "worker_subagent"),
+        "created_at": now_str,
+        "completed_at": None,
+        "result_summary": None
+    }
+    jobs[job_id] = job_data
+    save_jobs(jobs)
+    record_audit_event("JOB_CREATED", "master_dispatcher", "system", f"Created {job_id}: {task_desc}")
+    return {"ok": True, "job": job_data}
+
+def tool_job_update(args: dict) -> dict:
+    """Update progress or complete an asynchronous job ticket."""
+    job_id = args.get("job_id")
+    status = args.get("status", "completed")
+    result_summary = args.get("result_summary")
+    jobs = load_jobs()
+    if job_id not in jobs:
+        return {"ok": False, "error": f"Job {job_id} not found."}
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+    jobs[job_id]["status"] = status
+    if status == "completed":
+        jobs[job_id]["completed_at"] = now_str
+    if result_summary:
+        jobs[job_id]["result_summary"] = result_summary
+    save_jobs(jobs)
+    record_audit_event("JOB_UPDATED", "worker_subagent", "system", f"Updated {job_id} to {status}")
+    return {"ok": True, "job": jobs[job_id]}
+
+def tool_job_list(args: dict) -> dict:
+    """List active or recent job tickets."""
+    jobs = load_jobs()
+    status_filter = args.get("status")
+    job_list = list(jobs.values())
+    if status_filter:
+        job_list = [j for j in job_list if j.get("status") == status_filter]
+    return {"ok": True, "count": len(job_list), "jobs": job_list[-20:]}
+
+def tool_get_summary(args: dict = None) -> dict:
+    """
+    Generate an executive activity briefing summarizing Telegram traffic,
+    sparks, delegated jobs, and gateway telemetry.
+    """
+    cfg = load_config()
+    owner_id = str(cfg.get("owner_chat_id", ""))
+    now_dt = datetime.datetime.now()
+    cutoff_24h = now_dt - datetime.timedelta(hours=24)
+    today_prefix = now_dt.date().isoformat()
+    
+    total_events = 0
+    stats_24h = {
+        "owner_inbound": 0,
+        "owner_commands": 0,
+        "visitor_inbound": 0,
+        "outbound_alerts": 0,
+        "sparks_ingested": 0,
+        "jobs_created": 0,
+        "jobs_updated": 0
+    }
+    today_counts = {
+        "owner_inbound": 0,
+        "owner_commands": 0,
+        "visitor_inbound": 0,
+        "outbound_alerts": 0,
+        "sparks_ingested": 0,
+        "jobs_created": 0,
+        "jobs_updated": 0
+    }
+    recent_events = []
+    last_activity = "None"
+    
+    if AUDIT_JSONL_PATH.exists():
+        try:
+            with open(AUDIT_JSONL_PATH, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            total_events = len(lines)
+            
+            for line in reversed(lines):
+                try:
+                    ev = json.loads(line)
+                    ev_type = ev.get("event_type", "")
+                    ts = ev.get("timestamp", "")
+                    ht = ev.get("human_time", ts)
+                    if last_activity == "None":
+                        last_activity = ht
+                    
+                    if len(recent_events) < 8:
+                        recent_events.append({
+                            "time": ht,
+                            "type": ev_type,
+                            "actor": ev.get("actor", ""),
+                            "action": ev.get("action", "")
+                        })
+                    
+                    try:
+                        ev_dt = datetime.datetime.fromisoformat(ts)
+                        is_24h = ev_dt >= cutoff_24h
+                    except Exception:
+                        is_24h = False
+                    is_today = ts.startswith(today_prefix)
+                    
+                    for target_stats, condition in [(stats_24h, is_24h), (today_counts, is_today)]:
+                        if condition:
+                            if ev_type in ("OWNER_INBOUND", "OWNER_MESSAGE"):
+                                target_stats["owner_inbound"] += 1
+                            elif ev_type == "OWNER_COMMAND":
+                                target_stats["owner_commands"] += 1
+                            elif ev_type in ("VISITOR_INBOUND", "VISITOR_MESSAGE"):
+                                target_stats["visitor_inbound"] += 1
+                            elif ev_type == "OUTBOUND_ALERT":
+                                target_stats["outbound_alerts"] += 1
+                            elif ev_type == "SPARK_INGEST":
+                                target_stats["sparks_ingested"] += 1
+                            elif ev_type == "JOB_CREATED":
+                                target_stats["jobs_created"] += 1
+                            elif ev_type == "JOB_UPDATED":
+                                target_stats["jobs_updated"] += 1
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    jobs = load_jobs()
+    active_jobs = [j for j in jobs.values() if j.get("status") == "in_progress"]
+    completed_jobs = [j for j in jobs.values() if j.get("status") == "completed"]
+    failed_jobs = [j for j in jobs.values() if j.get("status") == "failed"]
+    
+    show_24h = (today_counts["owner_inbound"] + today_counts["visitor_inbound"] + today_counts["outbound_alerts"]) == 0
+    display_stats = stats_24h if show_24h else today_counts
+    window_label = "Past 24 Hours Traffic" if show_24h else "Today's Traffic & Actions"
+    
+    card_lines = [
+        "┌─────────────────────────────────────────────────────────────┐",
+        "│ 📡 TELEGRAM NEXUS: ACTIVITY & TELEMETRY BRIEFING            │",
+        "├─────────────────────────────────────────────────────────────┤",
+        f"│ 👤 Owner Chat ID   : {owner_id or 'Unbound':<39}│",
+        f"│ 🤖 Bot State       : {'Online & Ready' if cfg.get('bot_token') else 'Unconfigured':<39}│",
+        f"│ ⏱️  Last Activity   : {last_activity[:38]:<38}│",
+        "├─────────────────────────────────────────────────────────────┤",
+        f"│ 📊 {window_label:<57}│",
+        f"│  • Inbound Messages: {display_stats['owner_inbound'] + display_stats['owner_commands']:<3} (Cmds: {display_stats['owner_commands']})                         │",
+        f"│  • Ingested Sparks : {display_stats['sparks_ingested']:<3} -> ~/.gemini/Spark.md               │",
+        f"│  • Outbound Alerts : {display_stats['outbound_alerts']:<3} dispatches to phone               │",
+        f"│  • Quarantined     : {display_stats['visitor_inbound']:<3} visitor pings                     │",
+        "├─────────────────────────────────────────────────────────────┤",
+        "│ 🎟️ Asynchronous Job Tickets                                │",
+        f"│  • In Progress     : {len(active_jobs):<39}│",
+        f"│  • Completed       : {len(completed_jobs):<39}│",
+        f"│  • Failed          : {len(failed_jobs):<39}│"
+    ]
+    
+    if active_jobs:
+        card_lines.append("├─────────────────────────────────────────────────────────────┤")
+        card_lines.append("│ ⏳ Active Jobs:                                             │")
+        for aj in active_jobs[:3]:
+            task_snippet = (aj.get("task", "")[:35] + "..") if len(aj.get("task", "")) > 35 else aj.get("task", "")
+            card_lines.append(f"│  • [{aj.get('job_id')}] {task_snippet:<47}│")
+            
+    if completed_jobs:
+        card_lines.append("├─────────────────────────────────────────────────────────────┤")
+        card_lines.append("│ ✅ Recently Completed Jobs:                                 │")
+        for cj in completed_jobs[-3:]:
+            res = cj.get("result_summary") or cj.get("task", "")
+            res_snippet = (res[:35] + "..") if len(res) > 35 else res
+            card_lines.append(f"│  • [{cj.get('job_id')}] {res_snippet:<47}│")
+            
+    card_lines.append("└─────────────────────────────────────────────────────────────┘")
+    formatted_card = "\n".join(card_lines)
+    
+    return {
+        "ok": True,
+        "owner_chat_id": owner_id,
+        "last_activity": last_activity,
+        "stats_window": "past_24h" if show_24h else "today",
+        "stats": display_stats,
+        "today_stats": today_counts,
+        "stats_24h": stats_24h,
+        "job_counts": {
+            "total": len(jobs),
+            "in_progress": len(active_jobs),
+            "completed": len(completed_jobs),
+            "failed": len(failed_jobs)
+        },
+        "active_jobs": active_jobs,
+        "recent_completed_jobs": completed_jobs[-5:],
+        "recent_events": recent_events,
+        "formatted_card": formatted_card
     }
 
 # -----------------------------------------------------------------------------
@@ -498,18 +894,6 @@ TOOLS = [
         }
     },
     {
-        "name": "nexus_reply_visitor",
-        "description": "Send a reply to a visitor or collaborator who reached out through the bot.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "visitor_chat_id": {"type": "string", "description": "Visitor's Telegram chat ID"},
-                "message": {"type": "string", "description": "Reply text to deliver"}
-            },
-            "required": ["visitor_chat_id", "message"]
-        }
-    },
-    {
         "name": "nexus_get_audit_log",
         "description": "Inspect the persistent audit log of all events, messages, alerts, and actions passing through the bot.",
         "inputSchema": {
@@ -518,6 +902,75 @@ TOOLS = [
                 "limit": {"type": "integer", "default": 50, "description": "Maximum number of audit events to return"},
                 "event_type": {"type": "string", "description": "Optional filter by event_type (e.g. OWNER_MESSAGE, VISITOR_MESSAGE, OUTBOUND_ALERT, SPARK_INGEST)"}
             }
+        }
+    },
+    {
+        "name": "nexus_job_create",
+        "description": "Create an asynchronous job ticket (JOB-XX) for heavy worker delegation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Description of the job task to execute"},
+                "assigned_to": {"type": "string", "default": "worker_subagent", "description": "Target worker or subagent"}
+            },
+            "required": ["task"]
+        }
+    },
+    {
+        "name": "nexus_job_update",
+        "description": "Update status or add result summary to an active job ticket.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Job ticket ID (e.g. JOB-01)"},
+                "status": {"type": "string", "enum": ["in_progress", "completed", "failed"], "default": "completed"},
+                "result_summary": {"type": "string", "description": "Summary of completed task or error"}
+            },
+            "required": ["job_id"]
+        }
+    },
+    {
+        "name": "nexus_job_list",
+        "description": "List active or recent asynchronous job tickets.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["in_progress", "completed", "failed"], "description": "Optional status filter"}
+            }
+        }
+    },
+    {
+        "name": "nexus_get_summary",
+        "description": "Generate an executive activity briefing summarizing Telegram traffic, sparks, delegated jobs, and gateway telemetry.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
+        "name": "nexus_send_photo",
+        "description": "Send an image or visual artifact (.jpg, .png) to Karan's Telegram phone.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "photo_path": {"type": "string", "description": "Absolute or relative path to the image file"},
+                "caption": {"type": "string", "description": "Optional HTML/text caption to accompany the photo"},
+                "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"}
+            },
+            "required": ["photo_path"]
+        }
+    },
+    {
+        "name": "nexus_send_document",
+        "description": "Send a document or file (.md, .txt, .pdf, .csv, .json) to Karan's Telegram phone.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "doc_path": {"type": "string", "description": "Absolute or relative path to the document file"},
+                "caption": {"type": "string", "description": "Optional HTML/text caption to accompany the document"},
+                "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"}
+            },
+            "required": ["doc_path"]
         }
     }
 ]
@@ -528,8 +981,13 @@ TOOL_HANDLERS = {
     "nexus_send_alert": tool_send_alert,
     "nexus_poll_updates": tool_poll_updates,
     "nexus_ingest_spark": tool_ingest_spark,
-    "nexus_reply_visitor": tool_reply_visitor,
-    "nexus_get_audit_log": tool_get_audit_log
+    "nexus_get_audit_log": tool_get_audit_log,
+    "nexus_job_create": tool_job_create,
+    "nexus_job_update": tool_job_update,
+    "nexus_job_list": tool_job_list,
+    "nexus_get_summary": tool_get_summary,
+    "nexus_send_photo": tool_send_photo,
+    "nexus_send_document": tool_send_document
 }
 
 def send_json(data):
