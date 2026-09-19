@@ -82,6 +82,7 @@ Add the server entry to your MCP configuration:
 | `nexus_send_alert` | Send high-priority alert or report to Karan's phone | `message`, `parse_mode` |
 | `nexus_poll_updates` | Poll unread messages and public visitor inquiries | `limit` (default: 20) |
 | `nexus_ingest_spark` | Ingest unhandled owner thoughts into `Spark.md` | None |
+| `nexus_get_audit_log` | Query immutable audit log of all bot actions and events | `limit`, `event_type` |
 | `nexus_reply_visitor` | Forward reply to a portfolio visitor through the bot | `visitor_chat_id`, `message` |
 
 ---

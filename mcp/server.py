@@ -20,6 +20,45 @@ from pathlib import Path
 CONFIG_PATH = Path(os.path.expanduser("~/.gemini/config/telegram_config.json"))
 SPARK_PATH = Path(os.path.expanduser("~/.gemini/Spark.md"))
 MEDIA_DIR = Path(os.path.expanduser("~/.gemini/media"))
+LOG_DIR = Path(os.path.expanduser("~/.gemini/logs"))
+AUDIT_LOG_PATH = LOG_DIR / "telegram_nexus.log"
+AUDIT_JSONL_PATH = LOG_DIR / "telegram_nexus.jsonl"
+
+def record_audit_event(event_type: str, actor: str, chat_id: str, action: str, details: dict = None):
+    """
+    Append an immutable audit event to both human-readable log and machine-readable JSONL.
+    """
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        now_dt = datetime.datetime.now()
+        ts_iso = now_dt.isoformat()
+        ts_human = now_dt.strftime("%Y-%m-%d %H:%M:%S IST")
+        
+        event_record = {
+            "timestamp": ts_iso,
+            "human_time": ts_human,
+            "event_type": event_type,
+            "actor": actor,
+            "chat_id": chat_id,
+            "action": action,
+            "details": details or {}
+        }
+        
+        # 1. Machine-readable JSON Lines log
+        with open(AUDIT_JSONL_PATH, "a", encoding="utf-8") as f_json:
+            f_json.write(json.dumps(event_record, ensure_ascii=False) + "\n")
+            
+        # 2. High-contrast Human-readable audit log
+        log_line = f"[{ts_human}] [{event_type:<18}] [Actor: {actor} | ID: {chat_id}] Action: {action}"
+        if details:
+            details_str = json.dumps(details, ensure_ascii=False)
+            if len(details_str) > 120:
+                details_str = details_str[:117] + "..."
+            log_line += f" | {details_str}"
+        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f_log:
+            f_log.write(log_line + "\n")
+    except Exception:
+        pass
 
 def load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -100,8 +139,10 @@ def download_telegram_file(file_id: str, dest_path: Path) -> bool:
         req = urllib.request.Request(file_url, headers={"User-Agent": "Antigravity-Telegram-Nexus/1.0"})
         with urllib.request.urlopen(req, timeout=30) as response, open(dest_path, "wb") as f:
             f.write(response.read())
+        record_audit_event("MEDIA_DOWNLOAD", "system", "local", f"Saved {dest_path.name}", {"file_id": file_id, "size_bytes": dest_path.stat().st_size})
         return True
-    except Exception:
+    except Exception as e:
+        record_audit_event("MEDIA_ERROR", "system", "local", f"Download failed for {file_id}", {"error": str(e)})
         return False
 
 # -----------------------------------------------------------------------------
@@ -123,6 +164,7 @@ def tool_get_status(args: dict) -> dict:
     
     res = telegram_api_call("getMe")
     if not res.get("ok"):
+        record_audit_event("STATUS_ERROR", "system", "telegram", f"getMe failed: {res.get('description')}")
         return {
             "status": "error",
             "message": f"Telegram API error: {res.get('description')}",
@@ -151,6 +193,7 @@ def tool_configure(args: dict) -> dict:
         updated.append("owner_chat_id")
     
     save_config(cfg)
+    record_audit_event("CONFIG_UPDATE", "admin", cfg.get("owner_chat_id", "system"), f"Updated config fields: {', '.join(updated)}")
     return {
         "status": "success",
         "updated_fields": updated,
@@ -173,7 +216,13 @@ def tool_send_alert(args: dict) -> dict:
         "parse_mode": parse_mode,
         "disable_web_page_preview": args.get("disable_preview", True)
     }
-    return telegram_api_call("sendMessage", params)
+    res = telegram_api_call("sendMessage", params)
+    if res.get("ok"):
+        msg_id = res.get("result", {}).get("message_id")
+        record_audit_event("OUTBOUND_ALERT", "antigravity", str(chat_id), f"Sent alert #{msg_id}", {"preview": message[:100], "message_id": msg_id})
+    else:
+        record_audit_event("ALERT_FAILED", "antigravity", str(chat_id), f"Alert failed: {res.get('description')}")
+    return res
 
 def tool_poll_updates(args: dict) -> dict:
     """Fetch new messages from Telegram and auto-bind owner if /start detected."""
@@ -253,6 +302,14 @@ def tool_poll_updates(args: dict) -> dict:
             })
         
         is_owner = (chat_id == str(cfg.get("owner_chat_id", "")))
+        event_tag = "OWNER_INBOUND" if is_owner else "VISITOR_INBOUND"
+        record_audit_event(
+            event_tag,
+            sender_username or sender_name or ("owner" if is_owner else "visitor"),
+            chat_id,
+            f"Received {media_type}",
+            {"text": text[:150], "media_type": media_type, "update_id": up_id, "file_id": file_id}
+        )
         processed_messages.append({
             "update_id": up_id,
             "chat_id": chat_id,
@@ -311,6 +368,14 @@ def tool_ingest_spark(args: dict) -> dict:
     with open(SPARK_PATH, "a", encoding="utf-8") as f:
         f.write("\n".join(new_spark_lines))
     
+    record_audit_event(
+        "SPARK_INGEST",
+        "owner",
+        str(cfg.get("owner_chat_id", "")),
+        f"Ingested {len(owner_notes)} notes into Spark.md",
+        {"count": len(owner_notes), "notes": [n['text'][:100] for n in owner_notes]}
+    )
+    
     return {
         "status": "success",
         "ingested_count": len(owner_notes),
@@ -330,7 +395,52 @@ def tool_reply_visitor(args: dict) -> dict:
         "text": message,
         "parse_mode": args.get("parse_mode", "HTML")
     }
-    return telegram_api_call("sendMessage", params)
+    res = telegram_api_call("sendMessage", params)
+    if res.get("ok"):
+        record_audit_event("VISITOR_REPLY", "antigravity", str(visitor_chat_id), "Reply dispatched to visitor", {"preview": message[:100]})
+    else:
+        record_audit_event("REPLY_FAILED", "antigravity", str(visitor_chat_id), f"Failed to reply to visitor: {res.get('description')}")
+    return res
+
+def tool_get_audit_log(args: dict) -> dict:
+    """Inspect the immutable audit log of all events, messages, and actions that passed through the bot."""
+    limit = args.get("limit", 50)
+    event_filter = args.get("event_type")
+    
+    if not AUDIT_JSONL_PATH.exists():
+        return {
+            "status": "empty",
+            "total_events": 0,
+            "events": [],
+            "log_file": str(AUDIT_LOG_PATH)
+        }
+    
+    records = []
+    try:
+        with open(AUDIT_JSONL_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    if event_filter and r.get("event_type") != event_filter:
+                        continue
+                    records.append(r)
+                except Exception:
+                    continue
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+        
+    recent = records[-limit:]
+    return {
+        "status": "success",
+        "total_logged": len(records),
+        "returned_count": len(recent),
+        "log_file": str(AUDIT_LOG_PATH),
+        "jsonl_file": str(AUDIT_JSONL_PATH),
+        "events": recent
+    }
 
 # -----------------------------------------------------------------------------
 # MCP Server Tool Definitions & JSON-RPC Loop
@@ -398,6 +508,17 @@ TOOLS = [
             },
             "required": ["visitor_chat_id", "message"]
         }
+    },
+    {
+        "name": "nexus_get_audit_log",
+        "description": "Inspect the persistent audit log of all events, messages, alerts, and actions passing through the bot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "default": 50, "description": "Maximum number of audit events to return"},
+                "event_type": {"type": "string", "description": "Optional filter by event_type (e.g. OWNER_MESSAGE, VISITOR_MESSAGE, OUTBOUND_ALERT, SPARK_INGEST)"}
+            }
+        }
     }
 ]
 
@@ -407,7 +528,8 @@ TOOL_HANDLERS = {
     "nexus_send_alert": tool_send_alert,
     "nexus_poll_updates": tool_poll_updates,
     "nexus_ingest_spark": tool_ingest_spark,
-    "nexus_reply_visitor": tool_reply_visitor
+    "nexus_reply_visitor": tool_reply_visitor,
+    "nexus_get_audit_log": tool_get_audit_log
 }
 
 def send_json(data):

@@ -41,7 +41,17 @@ Use this skill whenever Karan invokes `/nexus`, `/telegram`, or needs to manage 
 | **`/nexus alert <message>`** | Send instant alert or report to Karan's phone | `nexus_send_alert` |
 | **`/nexus spark`** | Pull unhandled phone thoughts into `Spark.md` | `nexus_ingest_spark` |
 | **`/nexus poll`** | Check incoming messages & public inquiries | `nexus_poll_updates` |
+| **`/nexus log`** | Inspect persistent audit trail of all bot events | `nexus_get_audit_log` |
 | **`/nexus reply <chat_id> <msg>`** | Reply to a portfolio visitor through the bot | `nexus_reply_visitor` |
+
+---
+
+## 📜 Immutable Audit Logging Architecture
+All bot activity is recorded in dual formats at `~/.gemini/logs/`:
+* **Human-Readable Log**: `~/.gemini/logs/telegram_nexus.log` (Formatted timestamped entries with event types and actors).
+* **Machine-Readable Ledger**: `~/.gemini/logs/telegram_nexus.jsonl` (Append-only structured JSON Lines for deterministic querying and forensics).
+
+Logged event types: `OWNER_INBOUND`, `VISITOR_INBOUND`, `OUTBOUND_ALERT`, `SPARK_INGEST`, `MEDIA_DOWNLOAD`, `CONFIG_UPDATE`, `VISITOR_REPLY`.
 
 ---
 
