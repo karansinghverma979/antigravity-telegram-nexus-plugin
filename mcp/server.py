@@ -12,12 +12,14 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import datetime
+import time
 import traceback
 from pathlib import Path
 
 # Quarantined configuration file outside git-tracked repositories
 CONFIG_PATH = Path(os.path.expanduser("~/.gemini/config/telegram_config.json"))
 SPARK_PATH = Path(os.path.expanduser("~/.gemini/Spark.md"))
+MEDIA_DIR = Path(os.path.expanduser("~/.gemini/media"))
 
 def load_config() -> dict:
     if CONFIG_PATH.exists():
@@ -66,6 +68,42 @@ def telegram_api_call(method: str, params: dict = None) -> dict:
     except Exception as e:
         return {"ok": False, "description": str(e)}
 
+def ensure_bot_commands():
+    """Register official slash commands in Telegram bot UI."""
+    commands = [
+        {"command": "start", "description": "Authenticate / view connection status"},
+        {"command": "spark", "description": "Log thought directly to Spark.md"},
+        {"command": "status", "description": "Check Motobook & Blaze telemetry"},
+        {"command": "strike", "description": "Check active tactical strikes"},
+        {"command": "help", "description": "View command guide & help"}
+    ]
+    try:
+        telegram_api_call("setMyCommands", {"commands": commands})
+    except Exception:
+        pass
+
+def download_telegram_file(file_id: str, dest_path: Path) -> bool:
+    """Download a file from Telegram Cloud API by file_id."""
+    cfg = load_config()
+    token = cfg.get("bot_token")
+    if not token or not file_id:
+        return False
+    res = telegram_api_call("getFile", {"file_id": file_id})
+    if not res.get("ok"):
+        return False
+    file_path = res.get("result", {}).get("file_path")
+    if not file_path:
+        return False
+    file_url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        req = urllib.request.Request(file_url, headers={"User-Agent": "Antigravity-Telegram-Nexus/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as response, open(dest_path, "wb") as f:
+            f.write(response.read())
+        return True
+    except Exception:
+        return False
+
 # -----------------------------------------------------------------------------
 # Tool Implementations
 # -----------------------------------------------------------------------------
@@ -91,6 +129,7 @@ def tool_get_status(args: dict) -> dict:
             "owner_bound": bool(owner_id)
         }
     
+    ensure_bot_commands()
     bot_info = res.get("result", {})
     return {
         "status": "online",
@@ -166,6 +205,33 @@ def tool_poll_updates(args: dict) -> dict:
         sender_username = from_user.get("username", "")
         sender_name = f"{from_user.get('first_name', '')} {from_user.get('last_name', '')}".strip()
         
+        media_type = "text"
+        file_id = ""
+        duration = 0
+        if "voice" in msg:
+            media_type = "voice"
+            file_id = msg["voice"].get("file_id", "")
+            duration = msg["voice"].get("duration", 0)
+            if not text:
+                text = f"[🎙️ Voice Note: {duration}s]"
+        elif "audio" in msg:
+            media_type = "audio"
+            file_id = msg["audio"].get("file_id", "")
+            duration = msg["audio"].get("duration", 0)
+            if not text:
+                text = f"[🎵 Audio: {duration}s]"
+        elif "photo" in msg:
+            media_type = "photo"
+            file_id = msg["photo"][-1].get("file_id", "")
+            caption = msg.get("caption", "")
+            text = f"[📷 Photo: {caption}]" if caption else "[📷 Photo]"
+        elif "document" in msg:
+            media_type = "document"
+            file_id = msg["document"].get("file_id", "")
+            file_name = msg["document"].get("file_name", "file")
+            caption = msg.get("caption", "")
+            text = f"[📎 File: {file_name}] {caption}".strip()
+
         # Auto-bind owner if empty and command is /start or /auth
         if not cfg.get("owner_chat_id") and text.startswith(("/start", "/auth")):
             cfg["owner_chat_id"] = chat_id
@@ -183,6 +249,9 @@ def tool_poll_updates(args: dict) -> dict:
             "sender_name": sender_name,
             "sender_username": sender_username,
             "text": text,
+            "media_type": media_type,
+            "file_id": file_id,
+            "duration": duration,
             "date": msg.get("date"),
             "is_owner": is_owner
         })
@@ -213,7 +282,16 @@ def tool_ingest_spark(args: dict) -> dict:
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
     new_spark_lines = [f"\n---", f"### {now_str} (via Telegram Nexus)"]
     for note in owner_notes:
-        new_spark_lines.append(f"* {note['text']}")
+        if note.get("media_type") == "voice" and note.get("file_id"):
+            voice_filename = f"voice_{note.get('date', int(time.time()))}_{note.get('update_id')}.oga"
+            voice_dest = MEDIA_DIR / voice_filename
+            downloaded = download_telegram_file(note["file_id"], voice_dest)
+            if downloaded:
+                new_spark_lines.append(f"* 🎙️ Voice Note ({note.get('duration', 0)}s) saved to `~/.gemini/media/{voice_filename}`")
+            else:
+                new_spark_lines.append(f"* {note['text']}")
+        else:
+            new_spark_lines.append(f"* {note['text']}")
     new_spark_lines.append("")
     
     SPARK_PATH.parent.mkdir(parents=True, exist_ok=True)
