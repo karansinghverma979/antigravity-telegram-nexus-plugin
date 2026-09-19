@@ -86,15 +86,16 @@ Add the server entry to your MCP configuration:
 | :--- | :--- | :--- |
 | `nexus_get_status` | Check bot connectivity, health, and owner binding | None |
 | `nexus_configure` | Set bot token or owner chat ID in isolated config | `bot_token`, `owner_chat_id` |
-| `nexus_send_alert` | Send high-priority alert or report to Karan's phone | `message`, `parse_mode` |
-| `nexus_poll_updates` | Poll unread owner messages & auto-react with `⚡` | `limit` (default: 20) |
+| `nexus_send_alert` | Send high-priority alert or report with native message threading | `message`, `parse_mode`, `reply_to_message_id`, `job_id` |
+| `nexus_poll_updates` | Poll unread owner messages, auto-react with `⚡` & extract `message_id` | `limit` (default: 20) |
 | `nexus_ingest_spark` | Ingest unhandled owner thoughts into `Spark.md` | None |
-| `nexus_job_create` | Create asynchronous job ticket (`JOB-XX`) for background delegation | `task`, `assigned_to` |
-| `nexus_job_update` | Update progress or mark a job ticket completed | `job_id`, `status`, `result_summary` |
+| `nexus_job_create` | Create asynchronous job ticket (`JOB-XX`) with `original_message_id` | `task`, `assigned_to`, `original_message_id` |
+| `nexus_job_update` | Update progress, format duration, or mark job ticket completed | `job_id`, `status`, `result_summary`, `error` |
 | `nexus_job_list` | Query active or recent job tickets | `status` |
 | `nexus_get_summary` | Generate executive activity briefing card of traffic, sparks & jobs | None |
-| `nexus_send_photo` | Dispatch visual artifact or image (.jpg, .png) to Telegram | `photo_path`, `caption` |
-| `nexus_send_document` | Dispatch document or report (.md, .txt, .pdf, .csv) to Telegram | `doc_path`, `caption` |
+| `nexus_send_photo` | Dispatch visual artifact (.jpg, .png) with native message threading | `photo_path`, `caption`, `reply_to_message_id`, `job_id` |
+| `nexus_send_document` | Dispatch document (.md, .txt, .pdf, .csv) with native message threading | `doc_path`, `caption`, `reply_to_message_id`, `job_id` |
+| `nexus_send_boot_greeting` | Dispatch executive handshake greeting & quick-action palette | `chat_id` |
 | `nexus_get_audit_log` | Query immutable audit log of all bot actions and events | `limit`, `event_type` |
 
 ---
@@ -105,10 +106,10 @@ Add the server entry to your MCP configuration:
 
 | Executive Command | Target Action | Underlying Mechanism |
 | :--- | :--- | :--- |
-| **`/telegram-nexus start`** / `/nexus start` | Start managed checking loop | Spawns background subagent task |
-| **`/telegram-nexus stop`** / `/nexus stop` | Stop loop & halt background token consumption | Kills background listener task |
+| **`/telegram-nexus start`** / `/nexus start` | Start in-session reactive trigger loop | Launches `poll_wait.py` with Sacred Re-Arming |
+| **`/telegram-nexus stop`** / `/nexus stop` | Stop loop & release polling socket cleanly | Flags `STOP_FILE` & releases PID |
 | **`/telegram-nexus summary`** / `/nexus summary` | Render executive activity briefing card | `nexus_get_summary` |
-| **`/telegram-nexus status`** / `/nexus status` | Check gateway health, loop state & active jobs | `nexus_get_status` + `nexus_job_list` |
+| **`/telegram-nexus status`** / `/nexus status` | Check gateway health, loop state & active jobs | `python listener.py --status` |
 | **`/telegram-nexus jobs`** / `/nexus jobs` | List active and recent asynchronous job tickets | `nexus_job_list` |
 | **`/telegram-nexus alert <msg>`** | Send instant alert or report to Karan's phone | `nexus_send_alert` |
 | **`/telegram-nexus spark`** | Pull unhandled phone thoughts into `Spark.md` | `nexus_ingest_spark` |
@@ -158,6 +159,43 @@ To prevent terminal distraction and context pollution while working on the lapto
 │  • [JOB-01] Vacuum completed, 40 strikes and 56..          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## ⚡ In-Session Reactive Event Loop & The 4-Minute Watchdog
+
+### 1. Zero-Token Reactive Wakeup (`poll_wait.py`)
+Rather than burning tokens on empty polling loops or polling in a dead-end loop:
+- `poll_wait.py` holds Telegram's HTTPS socket silently in the background (0% CPU, 0 MB idle RAM, 0 tokens).
+- The exact millisecond Karan messages from Telegram, `poll_wait.py` outputs the payload and exits with code 0.
+- Antigravity CLI catches the task completion and **automatically wakes up the live agent in the active terminal window**, preserving 100% of the conversation context!
+
+### 2. The Sacred Re-Arming Invariant
+- At the end of every turn (after formulating the reply or queuing a job), the agent **must re-arm `poll_wait.py`** before ending its turn.
+- This guarantees the agent runs continuously across turns without ever stopping automatically.
+
+### 3. The 4-Minute Watchdog Sentinel
+- If an asynchronous job (`JOB-XX`) executes for **$\ge 4$ minutes (240s)**:
+  - `poll_wait.py` detects the elapsed time and wakes up the agent.
+  - The agent immediately dispatches an interim progress update card to Telegram:
+    `⏳ Job [JOB-XX] Progress Update: Elapsed 4+ minutes... Still crunching on Motobook.`
+
+### 4. Mandatory `job-id completed` Format & Failure Alerts
+- **Upon Success**:
+  ```text
+  ✅ Job [JOB-XX] Completed
+  ───────────────
+  Task: <description>
+  Duration: <time>
+  Summary: <deliverables>
+  ```
+- **Upon Failure**:
+  ```text
+  ❌ Job [JOB-XX] Failed
+  ───────────────
+  Task: <description>
+  Error: <details>
+  ```
 
 ---
 
