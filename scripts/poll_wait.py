@@ -95,8 +95,10 @@ def run_trigger():
                         pass
 
                 # 3. Long-poll Telegram (20-second hold at Telegram edge)
+                # IMPORTANT: dry_run=True means we detect messages WITHOUT consuming
+                # the offset. The agent will see the same messages on its real poll call.
                 try:
-                    res = server.tool_poll_updates({"timeout": 20})
+                    res = server.tool_poll_updates({"timeout": 20, "dry_run": True})
                     if res.get("ok"):
                         messages = res.get("messages", [])
                         owner_msgs = [m for m in messages if m.get("is_owner")]

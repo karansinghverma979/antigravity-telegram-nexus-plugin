@@ -605,11 +605,19 @@ def render_job_list(jobs: dict) -> str:
     return "".join(lines)
 
 def tool_poll_updates(args: dict) -> dict:
-    """Fetch new messages from Telegram and auto-bind owner if /start detected."""
+    """Fetch new messages from Telegram and auto-bind owner if /start detected.
+
+    Args:
+        dry_run (bool): If True, detect messages WITHOUT saving last_update_id to config.
+            Use this in poll_wait.py / trigger scripts so the agent sees the same messages
+            on its real poll call. Skips emoji reactions, typing indicators, slash command
+            handlers, and offset persistence. Default: False.
+    """
     cfg = load_config()
     offset = cfg.get("last_update_id", 0) + 1
     limit = args.get("limit", 20)
     poll_timeout = args.get("timeout", 0)
+    dry_run = bool(args.get("dry_run", False))
     
     res = telegram_api_call("getUpdates", {"offset": offset, "limit": limit, "timeout": poll_timeout})
     if not res.get("ok"):
@@ -723,8 +731,9 @@ def tool_poll_updates(args: dict) -> dict:
         )
 
         # Visual Hints: Attach emoji reaction to message bubble & trigger typing header
+        # Skip in dry_run mode — agent's real poll will handle this
         msg_id = msg.get("message_id")
-        if msg_id and args.get("auto_react", True):
+        if msg_id and args.get("auto_react", True) and not dry_run:
             try:
                 telegram_api_call("setMessageReaction", {
                     "chat_id": chat_id,
@@ -760,7 +769,8 @@ def tool_poll_updates(args: dict) -> dict:
                 referenced_job_id = job_match.group(1).upper()
 
         # Natural Language Swipe-Reply on Job Ticket Card
-        if is_owner and referenced_job_id and not text.strip().startswith("/"):
+        # Skip in dry_run mode — agent handles these on its real poll
+        if is_owner and referenced_job_id and not text.strip().startswith("/") and not dry_run:
             lower_text = text.strip().lower()
             if lower_text in ("status", "info", "details", "check", "progress"):
                 jobs = load_jobs()
@@ -785,7 +795,8 @@ def tool_poll_updates(args: dict) -> dict:
                 continue
 
         # Mobile Slash Command Hooks (Fast Path <0.1s)
-        if is_owner and text.strip().startswith("/"):
+        # Skip in dry_run mode — agent will handle on its real poll
+        if is_owner and text.strip().startswith("/") and not dry_run:
             clean_cmd = text.strip()
             cmd_lower = clean_cmd.lower()
 
@@ -1007,7 +1018,12 @@ def tool_poll_updates(args: dict) -> dict:
             "referenced_job_id": referenced_job_id
         })
     
-    if new_last_id > cfg.get("last_update_id", 0):
+    # ── CRITICAL: Only persist the offset in real (non-dry_run) mode ──────────────
+    # In dry_run mode (used by poll_wait.py trigger), we DETECT messages without
+    # consuming them. The agent's subsequent real nexus_poll_updates call will see
+    # the exact same messages and handle them properly. This is the fix for the
+    # "agent wakes up and finds nothing" race condition.
+    if not dry_run and new_last_id > cfg.get("last_update_id", 0):
         cfg["last_update_id"] = new_last_id
         save_config(cfg)
     
@@ -1015,7 +1031,8 @@ def tool_poll_updates(args: dict) -> dict:
         "ok": True,
         "count": len(processed_messages),
         "messages": processed_messages,
-        "owner_chat_id": cfg.get("owner_chat_id")
+        "owner_chat_id": cfg.get("owner_chat_id"),
+        "dry_run": dry_run
     }
 
 def tool_ingest_spark(args: dict) -> dict:
