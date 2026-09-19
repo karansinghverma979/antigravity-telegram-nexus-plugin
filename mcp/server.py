@@ -231,6 +231,16 @@ def tool_poll_updates(args: dict) -> dict:
             file_name = msg["document"].get("file_name", "file")
             caption = msg.get("caption", "")
             text = f"[📎 File: {file_name}] {caption}".strip()
+        elif "location" in msg:
+            media_type = "location"
+            lat = msg["location"].get("latitude")
+            lon = msg["location"].get("longitude")
+            text = f"[📍 Location: {lat}, {lon}] https://maps.google.com/?q={lat},{lon}"
+        elif "contact" in msg:
+            media_type = "contact"
+            c_name = f"{msg['contact'].get('first_name', '')} {msg['contact'].get('last_name', '')}".strip()
+            c_phone = msg['contact'].get('phone_number', '')
+            text = f"[👤 Contact: {c_name} - {c_phone}]"
 
         # Auto-bind owner if empty and command is /start or /auth
         if not cfg.get("owner_chat_id") and text.startswith(("/start", "/auth")):
@@ -282,12 +292,15 @@ def tool_ingest_spark(args: dict) -> dict:
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
     new_spark_lines = [f"\n---", f"### {now_str} (via Telegram Nexus)"]
     for note in owner_notes:
-        if note.get("media_type") == "voice" and note.get("file_id"):
-            voice_filename = f"voice_{note.get('date', int(time.time()))}_{note.get('update_id')}.oga"
-            voice_dest = MEDIA_DIR / voice_filename
-            downloaded = download_telegram_file(note["file_id"], voice_dest)
+        mtype = note.get("media_type", "text")
+        fid = note.get("file_id", "")
+        if fid and mtype in ("voice", "photo", "document", "audio"):
+            ext = "oga" if mtype == "voice" else ("mp3" if mtype == "audio" else ("jpg" if mtype == "photo" else "bin"))
+            fname = f"{mtype}_{note.get('date', int(time.time()))}_{note.get('update_id')}.{ext}"
+            fdest = MEDIA_DIR / fname
+            downloaded = download_telegram_file(fid, fdest)
             if downloaded:
-                new_spark_lines.append(f"* 🎙️ Voice Note ({note.get('duration', 0)}s) saved to `~/.gemini/media/{voice_filename}`")
+                new_spark_lines.append(f"* {note['text']} (saved: `~/.gemini/media/{fname}`)")
             else:
                 new_spark_lines.append(f"* {note['text']}")
         else:
