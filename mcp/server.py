@@ -406,13 +406,13 @@ def tool_send_boot_greeting(args: dict = None) -> dict:
     
     caption = (
         "⚡ <b>TELEGRAM NEXUS C2 ONLINE</b>\n\n"
-        "Motobook workstation gateway is active & listening in real-time.\n\n"
+        "Motobook workstation gateway is active &amp; listening in real-time.\n\n"
         "───────────────\n\n"
         "👤 <b>Controller</b>: Karan Singh Verma\n"
         "⏱️ <b>Latency</b>: Sub-Second (&lt;0.1s)\n"
         "🚀 <b>Mode</b>: Master Dispatcher Active\n\n"
         "───────────────\n\n"
-        "Tap commands below or send any photo, PDF, or query directly!"
+        "Tap /help for commands, or send any photo, PDF, or query directly!"
     )
     
     reply_markup = {
@@ -571,7 +571,7 @@ def render_job_list(jobs: dict) -> str:
     completed = [j for j in jobs.values() if j.get("status") == "completed"]
     failed = [j for j in jobs.values() if j.get("status") == "failed"]
     
-    lines = ["🎟️ <b>JOB REGISTRY & WORKER QUEUE</b>\n\n───────────────\n\n"]
+    lines = ["🎟️ <b>JOB REGISTRY &amp; WORKER QUEUE</b>\n\n───────────────\n\n"]
     
     if active:
         lines.append(f"⚡ <b>In Progress ({len(active)}):</b>\n\n")
@@ -716,7 +716,7 @@ def tool_poll_updates(args: dict) -> dict:
             try:
                 telegram_api_call("sendMessage", {
                     "chat_id": chat_id,
-                    "text": "⛔ <b>Access Denied</b>\nThis bot is a private sovereign Command & Control gateway restricted to personal workstation use only. Unauthorized messages are discarded.",
+                    "text": "⛔ <b>Access Denied</b>\nThis bot is a private sovereign Command &amp; Control gateway restricted to personal workstation use only. Unauthorized messages are discarded.",
                     "parse_mode": "HTML"
                 })
             except Exception:
@@ -803,20 +803,21 @@ def tool_poll_updates(args: dict) -> dict:
 
             if cmd_lower.startswith(("/start", "/help")):
                 palette_msg = (
-                    "⚡ <b>SOVEREIGN COMMAND & CONTROL PALETTE</b>\n\n"
-                    "Workstation gateway is active & synchronized in real-time.\n\n"
+                    "⚡ <b>SOVEREIGN COMMAND &amp; CONTROL PALETTE</b>\n\n"
+                    "Workstation gateway is active &amp; synchronized in real-time.\n\n"
                     "───────────────\n\n"
                     "🎮 <b>Executive Slash Commands:</b>\n\n"
-                    "• <code>/strike</code> — Check today's tactical strikes & milestones\n"
-                    "• <code>/task</code> — Inspect active campaigns & operations tree\n"
-                    "• <code>/joblist</code> — View active & recent worker job tickets\n"
+                    "• <code>/strike</code> — Check today's tactical strikes &amp; milestones\n"
+                    "• <code>/task</code> — Inspect active campaigns &amp; operations tree\n"
+                    "• <code>/joblist</code> — View active &amp; recent worker job tickets\n"
                     "• <code>/jobstatus &lt;id&gt;</code> — Detailed dossier of specific job ticket\n"
                     "• <code>/jobcancel &lt;id&gt;</code> — Cancel/abort an active job ticket\n"
-                    "• <code>/status</code> — Motobook battery, RAM & gateway telemetry\n"
+                    "• <code>/status</code> — Motobook battery, RAM &amp; gateway telemetry\n"
+                    "• <code>/ping</code> — Test gateway latency (instant pong)\n"
                     "• <code>/spark &lt;idea&gt;</code> — Record thought into Spark.md\n"
                     "• <code>/genimage &lt;prompt&gt;</code> — Generate AI visual on Motobook\n"
-                    "• <code>/gendoc &lt;ext&gt; &lt;topic&gt;</code> — Generate doc & send file\n"
-                    "• <code>/gsuite &lt;query&gt;</code> — Query Gmail, Calendar & Drive\n"
+                    "• <code>/gendoc &lt;ext&gt; &lt;topic&gt;</code> — Generate doc &amp; send file\n"
+                    "• <code>/gsuite &lt;query&gt;</code> — Query Gmail, Calendar &amp; Drive\n"
                     "• <code>/help</code> — Display this command guide\n\n"
                     "───────────────\n\n"
                     "💡 <b>Swipe-Reply Quick Actions:</b>\n"
@@ -847,7 +848,7 @@ def tool_poll_updates(args: dict) -> dict:
                     "───────────────\n\n"
                     f"🧠 <b>RAM</b>: {free_gb} GB free / {total_gb} GB ({used_pct}% used)\n\n"
                     f"🔋 <b>Power</b>: {batt_str}\n\n"
-                    "🌐 <b>Gateway</b>: Online & Listening (<0.1s)\n\n"
+                    "🌐 <b>Gateway</b>: Online &amp; Listening (&lt;0.1s)\n\n"
                     "───────────────\n\n"
                     "⚡ All systems operational."
                 )
@@ -856,12 +857,11 @@ def tool_poll_updates(args: dict) -> dict:
 
             elif cmd_lower.startswith("/ping"):
                 t_start = time.time()
-                # Round-trip latency: send → Telegram ACK
                 pong_msg = (
                     "🏓 <b>PONG</b>\n\n"
                     f"⚡ <b>Gateway Latency:</b> <code>{int((time.time() - t_start) * 1000)}ms</code>\n\n"
                     "───────────────\n\n"
-                    "🌐 <b>Status:</b> Motobook online & reactive"
+                    "🌐 <b>Status:</b> Motobook online &amp; reactive"
                 )
                 tool_send_alert({"chat_id": chat_id, "message": pong_msg, "reply_to_message_id": msg_id})
                 continue
@@ -972,7 +972,7 @@ def tool_poll_updates(args: dict) -> dict:
                     cur.execute("SELECT id, title, priority, stage, deadline FROM Tasks WHERE state = 'Execution' ORDER BY id LIMIT 6")
                     rows = cur.fetchall()
                     conn.close()
-                    lines = ["⚔️ <b>ACTIVE CAMPAIGNS & OPERATIONS</b>\n\n───────────────\n\n"]
+                    lines = ["⚔️ <b>ACTIVE CAMPAIGNS &amp; OPERATIONS</b>\n\n───────────────\n\n"]
                     if rows:
                         for r in rows:
                             lines.append(f"• <b>[T-{r['id']}]</b> {r['title']}\n  Stage: <code>{r['stage']}</code> | Priority: {r['priority']}\n  Deadline: {r['deadline'] or 'N/A'}\n\n")
