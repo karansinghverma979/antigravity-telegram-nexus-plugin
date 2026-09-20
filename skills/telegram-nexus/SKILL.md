@@ -136,6 +136,9 @@ Use this skill whenever Karan invokes `/nexus`, `/telegram`, or needs to manage 
 | **`/telegram-nexus summary`** | Render executive activity briefing card | `nexus_get_summary` |
 | **`/telegram-nexus jobs`** | List all active and recent `JOB-XX` tickets | `nexus_job_list` |
 | **`/telegram-nexus alert <msg>`** | Send instant alert or report to Karan's phone | `nexus_send_alert` |
+| **`/telegram-nexus choice`** | Send Yes/No or custom interactive button choices | `nexus_ask_choice` |
+| **`/telegram-nexus poll`** | Dispatch native Telegram poll widget (single/multi-choice) | `nexus_send_poll` |
+| **`/telegram-nexus checklist`** | Deploy live-updating interactive checkbox widget | `nexus_send_checklist` |
 | **`/telegram-nexus spark`** | Pull unhandled phone thoughts into `Spark.md` | `nexus_ingest_spark` |
 | **`/telegram-nexus log`** | Inspect persistent audit trail of all bot events | `nexus_get_audit_log` |
 
@@ -159,4 +162,16 @@ Use this skill whenever Karan invokes `/nexus`, `/telegram`, or needs to manage 
 ### 3. Swipe-Reply Quick Actions (Natural Language Shortcuts)
 - Reply to any `[JOB-XX]` card with **`status`** / **`info`** / **`check`** $\rightarrow$ Instant job dossier
 - Reply to any `[JOB-XX]` card with **`cancel`** / **`stop`** / **`kill`** $\rightarrow$ Terminate the ticket immediately
+
+### 4. 🔘 Interactive Mobile Widgets & Choice Engine
+* **`nexus_ask_choice(prompt, options=[["Yes", "No"]])`**:
+  - Renders inline keyboard buttons directly beneath the prompt message.
+  - Tapping an option returns the selected choice directly to the agent as text.
+* **`nexus_send_poll(question, options, is_anonymous=False, allows_multiple_answers=False)`**:
+  - Emits Telegram native poll widget.
+  - Captures `poll_answer` events and delivers voter choices to the agent.
+* **`nexus_send_checklist(title, items)`**:
+  - Dispatches interactive checkbox buttons (`[⬜ Item 1]`, `[⬜ Item 2]`).
+  - Tapping toggles between `⬜` and `✅` in real-time via `editMessageReplyMarkup` with haptic mobile toasts.
+  - `[🏁 Finish Checklist]` finalizes the widget and delivers a completion notice to the agent.
 

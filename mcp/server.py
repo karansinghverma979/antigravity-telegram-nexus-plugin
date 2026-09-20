@@ -8,6 +8,12 @@ Zero-daemon, pure Python standard library stdio JSON-RPC implementation.
 import sys
 import json
 import os
+
+# Force UTF-8 on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -26,6 +32,8 @@ LOG_DIR = Path(os.path.expanduser("~/.gemini/logs"))
 AUDIT_LOG_PATH = LOG_DIR / "telegram_nexus.log"
 AUDIT_JSONL_PATH = LOG_DIR / "telegram_nexus.jsonl"
 JOB_REGISTRY_PATH = LOG_DIR / "telegram_jobs.json"
+CHECKLIST_REGISTRY_PATH = LOG_DIR / "telegram_checklists.json"
+POLL_REGISTRY_PATH = LOG_DIR / "telegram_polls.json"
 
 def record_audit_event(event_type: str, actor: str, chat_id: str, action: str, details: dict = None):
     """
@@ -473,6 +481,179 @@ def tool_send_document(args: dict) -> dict:
             pass
     return send_telegram_file("sendDocument", "document", p, caption, chat_id, reply_to_message_id=reply_to_message_id)
 
+def tool_ask_choice(args: dict) -> dict:
+    """Send an interactive choice/decision card with tappable inline buttons to Karan's Telegram phone."""
+    prompt = args.get("prompt", "")
+    if not prompt:
+        return {"ok": False, "error": "prompt is required"}
+    raw_options = args.get("options", [["Yes", "No"]])
+    chat_id = args.get("chat_id")
+    reply_to_message_id = args.get("reply_to_message_id")
+    
+    inline_keyboard = []
+    if isinstance(raw_options, list):
+        if raw_options and not isinstance(raw_options[0], list):
+            # 1D list: if <= 3 options, put in 1 row; otherwise 1 option per row
+            if len(raw_options) <= 3:
+                row = [{"text": str(opt), "callback_data": f"choice:{opt}"} for opt in raw_options]
+                inline_keyboard.append(row)
+            else:
+                for opt in raw_options:
+                    inline_keyboard.append([{"text": str(opt), "callback_data": f"choice:{opt}"}])
+        else:
+            # 2D list of rows
+            for row_opts in raw_options:
+                row = []
+                for opt in row_opts:
+                    if isinstance(opt, dict):
+                        btn_text = opt.get("text", "")
+                        cb_data = opt.get("callback_data", f"choice:{btn_text}")
+                        row.append({"text": btn_text, "callback_data": cb_data})
+                    else:
+                        row.append({"text": str(opt), "callback_data": f"choice:{opt}"})
+                if row:
+                    inline_keyboard.append(row)
+                    
+    reply_markup = {"inline_keyboard": inline_keyboard} if inline_keyboard else None
+    res = tool_send_alert({
+        "chat_id": chat_id,
+        "message": prompt,
+        "reply_markup": reply_markup,
+        "reply_to_message_id": reply_to_message_id
+    })
+    if res.get("ok"):
+        record_audit_event("OUTBOUND_CHOICE", "antigravity", str(chat_id or "owner"), f"Dispatched choice prompt: {prompt[:40]}", {"options": raw_options})
+    return res
+
+def tool_send_poll(args: dict) -> dict:
+    """Send a native Telegram Poll (single/multi-choice or quiz) to Karan's Telegram phone.
+    Tracks poll metadata so voter responses are automatically interpreted when poll_answer updates arrive.
+    """
+    cfg = load_config()
+    chat_id = args.get("chat_id") or cfg.get("owner_chat_id")
+    if not chat_id:
+        return {"ok": False, "error": "No target chat ID configured"}
+    question = args.get("question", "")
+    if not question:
+        return {"ok": False, "error": "question is required"}
+    options = args.get("options", [])
+    if not options or len(options) < 2:
+        return {"ok": False, "error": "At least 2 options are required for a poll"}
+    if len(options) > 10:
+        return {"ok": False, "error": "Telegram polls allow a maximum of 10 options"}
+        
+    is_anonymous = bool(args.get("is_anonymous", False))
+    allows_multiple_answers = bool(args.get("allows_multiple_answers", False))
+    poll_type = args.get("poll_type", "regular")
+    
+    params = {
+        "chat_id": str(chat_id),
+        "question": str(question)[:300],
+        "options": [str(o)[:100] for o in options],
+        "is_anonymous": is_anonymous,
+        "type": poll_type,
+        "allows_multiple_answers": allows_multiple_answers
+    }
+    if poll_type == "quiz" and "correct_option_id" in args:
+        params["correct_option_id"] = int(args["correct_option_id"])
+        if "explanation" in args:
+            params["explanation"] = str(args["explanation"])[:200]
+            
+    reply_to_message_id = args.get("reply_to_message_id")
+    if reply_to_message_id:
+        params["reply_to_message_id"] = int(reply_to_message_id)
+        params["reply_parameters"] = {"message_id": int(reply_to_message_id)}
+        
+    res = telegram_api_call("sendPoll", params)
+    if res.get("ok"):
+        poll_obj = res.get("result", {}).get("poll", {})
+        poll_id = str(poll_obj.get("id"))
+        msg_id = res.get("result", {}).get("message_id")
+        
+        polls = load_polls()
+        polls[poll_id] = {
+            "poll_id": poll_id,
+            "message_id": msg_id,
+            "chat_id": str(chat_id),
+            "question": question,
+            "options": [str(o) for o in options],
+            "is_anonymous": is_anonymous,
+            "allows_multiple_answers": allows_multiple_answers,
+            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        }
+        save_polls(polls)
+        record_audit_event("OUTBOUND_POLL", "antigravity", str(chat_id), f"Sent poll: {question[:50]}", {"poll_id": poll_id, "options": options})
+    return res
+
+def tool_send_checklist(args: dict) -> dict:
+    """Send a checklist to Karan's Telegram phone.
+    By default (mode="native"), dispatches a native Telegram multiple-choice poll with real checkboxes.
+    If mode="buttons", dispatches an inline keyboard widget with toggleable callback buttons.
+    """
+    cfg = load_config()
+    chat_id = args.get("chat_id") or cfg.get("owner_chat_id")
+    if not chat_id:
+        return {"ok": False, "error": "No target chat ID configured"}
+    title = args.get("title", "Checklist")
+    raw_items = args.get("items", [])
+    if not raw_items:
+        return {"ok": False, "error": "items list is required"}
+    mode = args.get("mode", "native")
+    
+    if mode == "native":
+        opt_strings = []
+        for it in raw_items:
+            if isinstance(it, dict):
+                opt_strings.append(str(it.get("text", "")))
+            else:
+                opt_strings.append(str(it))
+        if len(opt_strings) < 2:
+            return {"ok": False, "error": "Native Telegram checklist requires at least 2 items"}
+        if len(opt_strings) > 10:
+            return {"ok": False, "error": "Native Telegram checklist allows a maximum of 10 items"}
+        return tool_send_poll({
+            "chat_id": chat_id,
+            "question": f"📋 {title}"[:300],
+            "options": opt_strings,
+            "allows_multiple_answers": True,
+            "is_anonymous": False,
+            "reply_to_message_id": args.get("reply_to_message_id")
+        })
+        
+    checklist_id = f"chk_{int(time.time())}_{uuid.uuid4().hex[:4]}"
+    items = []
+    for it in raw_items:
+        if isinstance(it, dict):
+            items.append({"text": str(it.get("text", "")), "done": bool(it.get("done", False))})
+        else:
+            items.append({"text": str(it), "done": False})
+            
+    reply_markup = render_checklist_markup(checklist_id, items)
+    card_text = (
+        f"📋 <b>{title.upper()}</b>\n\n"
+        "───────────────\n\n"
+        "Tap buttons below to toggle state:\n\n"
+        "───────────────\n\n"
+        "⚡ <i>Motobook Interactive Widget</i>"
+    )
+    
+    res = send_single_message(chat_id, card_text, reply_markup=reply_markup, reply_to_message_id=args.get("reply_to_message_id"))
+    if res.get("ok"):
+        msg_id = res.get("result", {}).get("message_id")
+        checklists = load_checklists()
+        checklists[checklist_id] = {
+            "checklist_id": checklist_id,
+            "chat_id": str(chat_id),
+            "message_id": msg_id,
+            "title": title,
+            "items": items,
+            "completed": False,
+            "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+        }
+        save_checklists(checklists)
+        record_audit_event("OUTBOUND_CHECKLIST", "antigravity", str(chat_id), f"Sent checklist: {title}", {"checklist_id": checklist_id, "item_count": len(items), "mode": mode})
+    return res
+
 # -----------------------------------------------------------------------------
 # Asynchronous Job Ticket Engine & Formatting Helpers
 # -----------------------------------------------------------------------------
@@ -490,6 +671,50 @@ def save_jobs(jobs: dict):
     JOB_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(JOB_REGISTRY_PATH, "w", encoding="utf-8") as f:
         json.dump(jobs, f, indent=2, ensure_ascii=False)
+
+def load_polls() -> dict:
+    if POLL_REGISTRY_PATH.exists():
+        try:
+            with open(POLL_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_polls(polls: dict):
+    POLL_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(POLL_REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(polls, f, indent=2, ensure_ascii=False)
+
+def load_checklists() -> dict:
+    if CHECKLIST_REGISTRY_PATH.exists():
+        try:
+            with open(CHECKLIST_REGISTRY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_checklists(checklists: dict):
+    CHECKLIST_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CHECKLIST_REGISTRY_PATH, "w", encoding="utf-8") as f:
+        json.dump(checklists, f, indent=2, ensure_ascii=False)
+
+def render_checklist_markup(checklist_id: str, items: list, completed: bool = False) -> dict:
+    keyboard = []
+    if not completed:
+        for idx, it in enumerate(items):
+            done = it.get("done", False)
+            marker = "✅ " if done else "⬜ "
+            label = f"{marker}{it.get('text', '')}"
+            keyboard.append([{"text": label[:60], "callback_data": f"chk:{checklist_id}:{idx}"}])
+        keyboard.append([{"text": "🏁 Finish Checklist", "callback_data": f"chk:{checklist_id}:done"}])
+    else:
+        for it in items:
+            marker = "✅ " if it.get("done", False) else "⬜ "
+            keyboard.append([{"text": f"{marker}{it.get('text', '')}"[:60], "callback_data": f"chk:{checklist_id}:noop"}])
+        keyboard.append([{"text": "🎉 Checklist Completed", "callback_data": f"chk:{checklist_id}:noop"}])
+    return {"inline_keyboard": keyboard}
 
 def normalize_job_id(raw_id: str) -> str:
     if not raw_id:
@@ -620,7 +845,13 @@ def tool_poll_updates(args: dict) -> dict:
     poll_timeout = args.get("timeout", 0)
     dry_run = bool(args.get("dry_run", False))
     
-    res = telegram_api_call("getUpdates", {"offset": offset, "limit": limit, "timeout": poll_timeout})
+    poll_params = {
+        "offset": offset,
+        "limit": limit,
+        "timeout": poll_timeout,
+        "allowed_updates": ["message", "edited_message", "callback_query", "poll", "poll_answer"]
+    }
+    res = telegram_api_call("getUpdates", poll_params)
     if not res.get("ok"):
         return {"ok": False, "error": res.get("description")}
     
@@ -635,18 +866,114 @@ def tool_poll_updates(args: dict) -> dict:
         
         msg = u.get("message") or u.get("channel_post")
         cb = u.get("callback_query")
-        if cb:
-            try:
-                telegram_api_call("answerCallbackQuery", {"callback_query_id": cb["id"]})
-            except Exception:
-                pass
-            msg = cb.get("message") or {}
+        poll_ans = u.get("poll_answer")
+        media_type = "text"
+        
+        if poll_ans:
+            poll_id = str(poll_ans.get("poll_id", ""))
+            user = poll_ans.get("user", {})
+            user_id = str(user.get("id"))
+            chat_id = user_id
+            sender_username = user.get("username", "")
+            sender_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+            
+            polls = load_polls()
+            p_info = polls.get(poll_id, {})
+            q = p_info.get("question", f"Poll #{poll_id}")
+            opts = p_info.get("options", [])
+            selected_ids = poll_ans.get("option_ids", [])
+            selected_labels = [opts[i] if i < len(opts) else str(i) for i in selected_ids]
+            labels_str = ", ".join(selected_labels) if selected_labels else "Retracted / None"
+            text = f"[📊 Poll Vote: \"{q}\"] Selected: {labels_str}"
+            media_type = "poll_vote"
+            msg = {"message_id": p_info.get("message_id")}
+        elif cb:
+            cb_id = cb.get("id")
+            cb_data = cb.get("data", "")
             from_user = cb.get("from", {})
+            user_id = str(from_user.get("id"))
+            msg = cb.get("message") or {}
             chat = msg.get("chat", {})
-            chat_id = str(chat.get("id")) if chat and chat.get("id") else str(from_user.get("id"))
-            text = cb.get("data", "")
+            chat_id = str(chat.get("id")) if chat and chat.get("id") else user_id
             sender_username = from_user.get("username", "")
             sender_name = f"{from_user.get('first_name', '')} {from_user.get('last_name', '')}".strip()
+            
+            # Interactive Checklist Toggle Hook: chk:<checklist_id>:<index_or_action>
+            if cb_data.startswith("chk:"):
+                parts = cb_data.split(":")
+                checklist_id = parts[1] if len(parts) > 1 else ""
+                action = parts[2] if len(parts) > 2 else ""
+                checklists = load_checklists()
+                if checklist_id in checklists:
+                    chk = checklists[checklist_id]
+                    if action == "done":
+                        chk["completed"] = True
+                        save_checklists(checklists)
+                        new_markup = render_checklist_markup(checklist_id, chk["items"], completed=True)
+                        telegram_api_call("editMessageReplyMarkup", {
+                            "chat_id": chat_id,
+                            "message_id": msg.get("message_id"),
+                            "reply_markup": new_markup
+                        })
+                        try:
+                            telegram_api_call("answerCallbackQuery", {
+                                "callback_query_id": cb_id,
+                                "text": "🏁 Checklist finalized & marked complete!"
+                            })
+                        except Exception:
+                            pass
+                        text = f"[✅ Checklist Completed: {chk.get('title', 'Checklist')}] All items finished."
+                    elif action == "noop":
+                        try:
+                            telegram_api_call("answerCallbackQuery", {
+                                "callback_query_id": cb_id,
+                                "text": "Checklist is already finalized."
+                            })
+                        except Exception:
+                            pass
+                        continue
+                    else:
+                        try:
+                            idx = int(action)
+                            if 0 <= idx < len(chk.get("items", [])):
+                                chk["items"][idx]["done"] = not chk["items"][idx]["done"]
+                                save_checklists(checklists)
+                                is_done = chk["items"][idx]["done"]
+                                item_text = chk["items"][idx]["text"]
+                                new_markup = render_checklist_markup(checklist_id, chk["items"])
+                                telegram_api_call("editMessageReplyMarkup", {
+                                    "chat_id": chat_id,
+                                    "message_id": msg.get("message_id"),
+                                    "reply_markup": new_markup
+                                })
+                                status_emoji = "✅" if is_done else "⬜"
+                                try:
+                                    telegram_api_call("answerCallbackQuery", {
+                                        "callback_query_id": cb_id,
+                                        "text": f"{status_emoji} {item_text[:40]}"
+                                    })
+                                except Exception:
+                                    pass
+                                text = f"[📋 Checklist Toggle: {chk.get('title', 'Checklist')}] {item_text} -> {'DONE' if is_done else 'TODO'}"
+                        except Exception:
+                            continue
+                else:
+                    try:
+                        telegram_api_call("answerCallbackQuery", {
+                            "callback_query_id": cb_id,
+                            "text": "⚠️ Checklist not found or expired"
+                        })
+                    except Exception:
+                        pass
+                    continue
+            else:
+                try:
+                    telegram_api_call("answerCallbackQuery", {"callback_query_id": cb_id})
+                except Exception:
+                    pass
+                text = cb_data
+                if text.startswith("choice:"):
+                    text = text[len("choice:"):].strip()
         elif not msg:
             continue
         else:
@@ -657,7 +984,6 @@ def tool_poll_updates(args: dict) -> dict:
             sender_username = from_user.get("username", "")
             sender_name = f"{from_user.get('first_name', '')} {from_user.get('last_name', '')}".strip()
         
-        media_type = "text"
         file_id = ""
         duration = 0
         if "voice" in msg:
@@ -1476,7 +1802,8 @@ TOOLS = [
                 "parse_mode": {"type": "string", "enum": ["HTML", "MarkdownV2"], "default": "HTML"},
                 "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"},
                 "reply_to_message_id": {"type": "integer", "description": "Optional Telegram message_id to quote/reply directly to"},
-                "job_id": {"type": "string", "description": "Optional job ticket ID (e.g. JOB-01) to auto-thread reply to original message"}
+                "job_id": {"type": "string", "description": "Optional job ticket ID (e.g. JOB-01) to auto-thread reply to original message"},
+                "reply_markup": {"type": "object", "description": "Optional Telegram reply_markup (e.g. inline_keyboard layout)"}
             },
             "required": ["message"]
         }
@@ -1616,6 +1943,63 @@ TOOLS = [
                 "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"}
             }
         }
+    },
+    {
+        "name": "nexus_ask_choice",
+        "description": "Send an interactive choice/decision card with tappable inline buttons to Karan's Telegram phone (e.g. Yes/No or custom options).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Question or card prompt text (HTML allowed)"},
+                "options": {
+                    "type": "array",
+                    "description": "Button choices: 1D array ['Yes', 'No'] or 2D array of rows [['Approve', 'Reject'], ['More Info']]"
+                },
+                "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"},
+                "reply_to_message_id": {"type": "integer", "description": "Optional Telegram message_id to quote directly"}
+            },
+            "required": ["prompt"]
+        }
+    },
+    {
+        "name": "nexus_send_poll",
+        "description": "Send a native Telegram Poll widget (single/multi-choice or quiz) to Karan's Telegram phone. Real-time poll_answer votes are captured and routed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "Poll question (up to 300 characters)"},
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of 2 to 10 answer options"
+                },
+                "is_anonymous": {"type": "boolean", "default": False, "description": "Whether poll is anonymous (default false to capture owner's vote)"},
+                "allows_multiple_answers": {"type": "boolean", "default": False, "description": "Allow selecting multiple choices"},
+                "poll_type": {"type": "string", "enum": ["regular", "quiz"], "default": "regular", "description": "Poll type"},
+                "correct_option_id": {"type": "integer", "description": "0-based index of correct answer if quiz mode"},
+                "explanation": {"type": "string", "description": "Explanation shown if incorrect answer chosen in quiz mode"},
+                "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"},
+                "reply_to_message_id": {"type": "integer", "description": "Optional Telegram message_id to quote directly"}
+            },
+            "required": ["question", "options"]
+        }
+    },
+    {
+        "name": "nexus_send_checklist",
+        "description": "Send an interactive live-updating checklist widget with tappable checkbox buttons. Tapping buttons toggles items (⬜ ⇄ ✅) in-place in real-time.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "default": "Interactive Checklist", "description": "Checklist header title"},
+                "items": {
+                    "type": "array",
+                    "description": "List of checklist items (strings or {text, done} objects)"
+                },
+                "chat_id": {"type": "string", "description": "Optional target chat ID (defaults to owner)"},
+                "reply_to_message_id": {"type": "integer", "description": "Optional Telegram message_id to quote directly"}
+            },
+            "required": ["items"]
+        }
     }
 ]
 
@@ -1634,7 +2018,10 @@ TOOL_HANDLERS = {
     "nexus_get_summary": tool_get_summary,
     "nexus_send_photo": tool_send_photo,
     "nexus_send_document": tool_send_document,
-    "nexus_send_boot_greeting": tool_send_boot_greeting
+    "nexus_send_boot_greeting": tool_send_boot_greeting,
+    "nexus_ask_choice": tool_ask_choice,
+    "nexus_send_poll": tool_send_poll,
+    "nexus_send_checklist": tool_send_checklist
 }
 
 def send_json(data):

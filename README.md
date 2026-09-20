@@ -86,7 +86,10 @@ Add the server entry to your MCP configuration:
 | :--- | :--- | :--- |
 | `nexus_get_status` | Check bot connectivity, health, and owner binding | None |
 | `nexus_configure` | Set bot token or owner chat ID in isolated config | `bot_token`, `owner_chat_id` |
-| `nexus_send_alert` | Send high-priority alert or report with native message threading | `message`, `parse_mode`, `reply_to_message_id`, `job_id` |
+| `nexus_send_alert` | Send high-priority alert or report with native message threading | `message`, `parse_mode`, `reply_to_message_id`, `job_id`, `reply_markup` |
+| `nexus_ask_choice` | Send interactive choice card with tappable buttons (Yes/No, menus) | `prompt`, `options`, `reply_to_message_id` |
+| `nexus_send_poll` | Dispatch native Telegram poll widget (single/multi-choice or quiz) | `question`, `options`, `is_anonymous`, `allows_multiple_answers`, `poll_type` |
+| `nexus_send_checklist` | Deploy live-updating interactive checkbox widget (⬜ ⇄ ✅ in-place) | `title`, `items`, `reply_to_message_id` |
 | `nexus_poll_updates` | Poll unread owner messages, auto-react with `⚡` & extract `message_id` | `limit` (default: 20) |
 | `nexus_ingest_spark` | Ingest unhandled owner thoughts into `Spark.md` | None |
 | `nexus_job_create` | Create asynchronous job ticket (`JOB-XX`) with `original_message_id` | `task`, `assigned_to`, `original_message_id` |
@@ -138,6 +141,34 @@ Add the server entry to your MCP configuration:
 Swipe right on any `[JOB-XX]` ticket card on Telegram and reply:
 - **`status`** / **`info`** / **`check`** $\rightarrow$ Instant full job dossier
 - **`cancel`** / **`stop`** / **`kill`** $\rightarrow$ Terminate the active ticket immediately
+
+### 4. 🔘 Interactive Mobile Widgets, Choices & Real-Time Voting Engine
+
+```text
+┌─────────────────────────────────┐      ┌────────────────────────────────┐
+│        nexus_ask_choice         │      │        nexus_send_poll         │
+│  (Buttons: Yes/No, Menus, etc.) │      │  (Native Telegram Poll Widget) │
+└────────────────┬────────────────┘      └───────────────┬────────────────┘
+                 │                                       │
+                 ▼                                       ▼
+    sendMessage + inline_keyboard                   sendPoll API
+                 │                                       │
+                 ▼                                       ▼
+       callback_query update                    poll_answer update
+                 │                                       │
+                 └──────────────► Agent Awake ◄──────────┘
+```
+
+* **Interactive Choices (`nexus_ask_choice`)**:
+  - Sends a clean card with single-row or multi-row tap buttons (`[["Yes", "No"]]` or `[["Deploy Prod", "Deploy Staging"], ["Abort"]]`).
+  - Tapping an option immediately responds via `callback_data` and delivers your choice directly to the agent without manual typing.
+* **Native Telegram Polls (`nexus_send_poll`)**:
+  - Uses Telegram's native `sendPoll` API (supports single-choice, multiple-choice, and quiz mode).
+  - Captures `poll_answer` events and delivers voter selections back to the workstation.
+* **Live Interactive Checklists (`nexus_send_checklist`)**:
+  - Dispatches interactive checkbox buttons (`[⬜ Strike #1]`, `[⬜ Strike #2]`).
+  - Tapping toggles between `⬜` and `✅` in-place in real-time via `editMessageReplyMarkup` with haptic mobile toasts.
+  - `[🏁 Finish Checklist]` finalizes the widget and delivers a completion notice to the agent.
 
 ---
 
