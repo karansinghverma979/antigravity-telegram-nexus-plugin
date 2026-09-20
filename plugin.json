@@ -1,7 +1,7 @@
 {
   "name": "telegram-nexus-plugin",
   "description": "Sovereign Telegram Automation Nexus, Mobile C2 Gateway & Dispatch Firewall for Google Antigravity",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "Karan Singh Verma",
   "license": "MIT",
   "homepage": "https://github.com/karansinghverma979/antigravity-telegram-nexus-plugin",

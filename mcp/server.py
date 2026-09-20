@@ -147,15 +147,83 @@ def ensure_bot_commands():
         pass
 
 def sanitize_telegram_html(text: str) -> str:
-    """Safely escapes stray & and < characters while preserving valid Telegram HTML formatting tags."""
+    """Safely sanitizes text for Telegram HTML parse_mode:
+    1. Escapes stray & to &amp; (preserving valid HTML entities: &amp;, &lt;, &gt;, &quot;).
+    2. Protects valid Telegram tags: <b>, <i>, <u>, <s>, <code>, <pre>, <blockquote>, <a>, <tg-spoiler>, etc.
+    3. Escapes any remaining stray < and > to &lt; and &gt;.
+    4. Auto-balances and auto-closes unclosed tags so Telegram entity parser never throws 'can't parse entities'.
+    5. Strips orphaned lone closing tags to prevent entity mismatch errors.
+    """
     if not text:
         return ""
-    # 1. Escape & that is not part of a recognized HTML entity
+
+    # 1. Escape stray & that is not already a valid HTML entity
     text = re.sub(r'&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)', '&amp;', text)
-    # 2. Escape < that does not match a valid Telegram HTML tag
-    valid_tags = r'b|i|u|s|code|pre|a(\s+[^>]*)?|blockquote|strong|em|ins|strike|del|span|tg-spoiler'
-    pattern = rf'<(?!/?({valid_tags})\b[^>]*>)'
-    return re.sub(pattern, '&lt;', text, flags=re.IGNORECASE)
+
+    # 2. Extract valid Telegram HTML tags and replace with unique placeholders
+    valid_tag_pattern = re.compile(
+        r'<(/?(?:b|strong|i|em|u|ins|s|strike|del|code|pre|blockquote|tg-spoiler)\b[^>]*|span(?:\s+class="[^"]*")?|a(?:\s+href="[^"]*")?)>',
+        re.IGNORECASE
+    )
+
+    placeholders = []
+    def save_tag(m):
+        idx = len(placeholders)
+        placeholders.append(m.group(0))
+        return f"\x00TAG{idx}\x00"
+
+    protected_text = valid_tag_pattern.sub(save_tag, text)
+
+    # 3. Escape all remaining stray < and > in the plain text
+    protected_text = protected_text.replace("<", "&lt;").replace(">", "&gt;")
+
+    # 4. Restore valid tags from placeholders
+    for idx, tag in enumerate(placeholders):
+        protected_text = protected_text.replace(f"\x00TAG{idx}\x00", tag)
+
+    # 5. Tag balancing: ensure every opened tag has a closing tag, and drop orphaned closing tags
+    stackable = {
+        "b": "b", "strong": "strong", "i": "i", "em": "em",
+        "u": "u", "ins": "ins", "s": "s", "strike": "strike", "del": "del",
+        "code": "code", "pre": "pre", "blockquote": "blockquote",
+        "a": "a", "span": "span", "tg-spoiler": "tg-spoiler"
+    }
+    open_stack = []
+    tag_regex = re.compile(r'<(/?)([a-zA-Z0-9\-_]+)[^>]*>')
+    
+    cleaned_tokens = []
+    last_end = 0
+    for m in tag_regex.finditer(protected_text):
+        cleaned_tokens.append(protected_text[last_end:m.start()])
+        last_end = m.end()
+        is_closing = bool(m.group(1))
+        tname = m.group(2).lower()
+        full_tag = m.group(0)
+        
+        if tname in stackable:
+            if is_closing:
+                if tname in open_stack:
+                    while open_stack and open_stack[-1] != tname:
+                        cleaned_tokens.append(f"</{open_stack.pop()}>")
+                    if open_stack:
+                        open_stack.pop()
+                    cleaned_tokens.append(full_tag)
+                else:
+                    # Lone closing tag without an opening tag -> drop it
+                    pass
+            else:
+                open_stack.append(tname)
+                cleaned_tokens.append(full_tag)
+        else:
+            cleaned_tokens.append(full_tag)
+            
+    cleaned_tokens.append(protected_text[last_end:])
+    protected_text = "".join(cleaned_tokens)
+
+    while open_stack:
+        protected_text += f"</{open_stack.pop()}>"
+
+    return protected_text
 
 def send_telegram_file(method: str, file_param: str, file_path: Path, caption: str = "", chat_id: str = None, reply_markup: dict = None, reply_to_message_id: int = None) -> dict:
     """Send local photo or document to Telegram Cloud API via multipart form with caption protection, HTML fallback, and message threading."""
@@ -227,9 +295,10 @@ def send_telegram_file(method: str, file_param: str, file_path: Path, caption: s
 
     try:
         res = build_and_send(include_html=True)
-        if not res.get("ok") and "can't parse entities" in res.get("description", "").lower():
+        if not res.get("ok") and any(phrase in res.get("description", "").lower() for phrase in ["can't parse entities", "parse entity", "entity", "tag"]):
             # Strip tags for clean text fallback (never leak raw tags)
             plain_caption = re.sub(r'<[^>]+>', '', caption)
+            plain_caption = plain_caption.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
             res = build_and_send(include_html=False, clean_plain_caption=plain_caption)
             
         if res.get("ok"):
@@ -339,8 +408,10 @@ def send_single_message(chat_id: str, text: str, parse_mode: str = "HTML", disab
         params["reply_parameters"] = {"message_id": int(reply_to_message_id)}
     res = telegram_api_call("sendMessage", params)
     # Automatic Plain-Text Fallback: If Telegram fails because of malformed HTML/tags, strip all tags completely
-    if not res.get("ok") and "can't parse entities" in res.get("description", "").lower():
-        params["text"] = re.sub(r'<[^>]+>', '', text)
+    if not res.get("ok") and any(phrase in res.get("description", "").lower() for phrase in ["can't parse entities", "parse entity", "entity", "tag"]):
+        plain_text = re.sub(r'<[^>]+>', '', text)
+        plain_text = plain_text.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+        params["text"] = plain_text
         params.pop("parse_mode", None)
         res = telegram_api_call("sendMessage", params)
     return res

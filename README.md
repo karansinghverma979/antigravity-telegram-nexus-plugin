@@ -278,6 +278,7 @@ plugins/telegram-nexus-plugin/
 - **Zero Token Commits**: Tokens are quarantined in `~/.gemini/config/telegram_config.json`, which is excluded from git tracking via `.gitignore`.
 - **Strict Sovereign Owner Gating**: Only the authenticated owner chat ID can interact with the workstation; all unauthorized callers receive immediate 403 access denial with zero system footprint.
 - **Immutable Audit Logging**: Every transaction, rejected access attempt, job creation, and outbound alert is recorded in local append-only log files (`~/.gemini/logs/telegram_nexus.log` and `.jsonl`).
+- **Zero Raw Tag Entity Defense**: Built-in 3-phase HTML tokenizer with automatic tag-balancing, stray delimiter escaping (`&`, `<`, `>`), orphaned tag elimination, and a fail-safe regex tag stripper that guarantees raw HTML formatting tags (`<b>`, `<code>`, `<pre>`) never leak to mobile screens.
 - **SHA Action Pinning**: GitHub Actions in `.github/workflows/` are pinned to immutable commit SHAs.
 
 ---
