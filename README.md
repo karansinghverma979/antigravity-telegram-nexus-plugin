@@ -92,6 +92,8 @@ Add the server entry to your MCP configuration:
 | `nexus_job_create` | Create asynchronous job ticket (`JOB-XX`) with `original_message_id` | `task`, `assigned_to`, `original_message_id` |
 | `nexus_job_update` | Update progress, format duration, or mark job ticket completed | `job_id`, `status`, `result_summary`, `error` |
 | `nexus_job_list` | Query active or recent job tickets | `status` |
+| `nexus_job_get` | Retrieve deep dossier & execution metadata of a specific job ticket | `job_id` |
+| `nexus_job_cancel` | Terminate and mark an in-progress job ticket as aborted | `job_id`, `reason` |
 | `nexus_get_summary` | Generate executive activity briefing card of traffic, sparks & jobs | None |
 | `nexus_send_photo` | Dispatch visual artifact (.jpg, .png) with native message threading | `photo_path`, `caption`, `reply_to_message_id`, `job_id` |
 | `nexus_send_document` | Dispatch document (.md, .txt, .pdf, .csv) with native message threading | `doc_path`, `caption`, `reply_to_message_id`, `job_id` |
@@ -118,15 +120,24 @@ Add the server entry to your MCP configuration:
 
 | Mobile Slash Command | Speed / Path | Specialized Agent Hook & Execution |
 | :--- | :--- | :--- |
+| **`/ping`** | Fast Path (<0.1s) | Latency benchmark test $\rightarrow$ returns instant pong & connection health |
+| **`/joblist`** (or `/jobs`) | Fast Path (<0.1s) | Displays active background worker queue & recent job ticket dossiers |
+| **`/jobstatus <id>`** | Fast Path (<0.1s) | Deep inspection of specific ticket (e.g. `/jobstatus JOB-01` or `/jobstatus 1`) |
+| **`/jobcancel <id>`** | Fast Path (<0.1s) | Cancels & aborts active background worker execution |
+| **`/strike`** | Fast Path (<2s) | Queries `campaigns.sqlite` strikes table $\rightarrow$ returns today's strike checklist |
+| **`/task`** | Fast Path (<2s) | Queries active execution campaigns from `campaigns.sqlite` |
+| **`/status`** | Fast Path (<0.1s) | Dispatches Motobook battery, RAM, and gateway health telemetry |
+| **`/spark <note>`** | Fast Path (<0.1s) | Ingests thought into `~/.gemini/Spark.md` and appends to Spark queue |
 | **`/genimage <prompt>`** | Slow Path (`JOB-XX`) | Generates AI visual on Motobook $\rightarrow$ delivers via `nexus_send_photo` |
 | **`/gendoc <ext> <topic>`** | Slow Path (`JOB-XX`) | Generates `.md`/`.txt`/`.csv` document $\rightarrow$ delivers via `nexus_send_document` |
 | **`/gsuite <query>`** | Fast/Slow Path | Queries Google Workspace MCP (Gmail, Calendar, Drive, Docs) |
-| **`/strike`** | Fast Path (<2s) | Queries `campaigns.sqlite` strikes table $\rightarrow$ returns today's strike checklist |
-| **`/task`** | Fast Path (<2s) | Queries active campaigns & operations tree from `campaigns.sqlite` |
-| **`/job`** | Fast Path (<1s) | Lists active and completed asynchronous background worker tickets |
-| **`/spark <note>`** | Fast Path (<1s) | Appends note to `~/.gemini/Spark.md` and attaches `⚡` reaction |
-| **`/status`** | Fast Path (<2s) | Dispatches Motobook battery, RAM, and gateway health telemetry |
-| **`/help`** | Fast Path (<1s) | Displays interactive command palette and documentation |
+| **`/help`** | Fast Path (<0.1s) | Displays interactive command palette and documentation |
+
+### 3. Swipe-Reply Quick Actions (Natural Language Shortcuts)
+
+Swipe right on any `[JOB-XX]` ticket card on Telegram and reply:
+- **`status`** / **`info`** / **`check`** $\rightarrow$ Instant full job dossier
+- **`cancel`** / **`stop`** / **`kill`** $\rightarrow$ Terminate the active ticket immediately
 
 ---
 
@@ -196,6 +207,34 @@ Rather than burning tokens on empty polling loops or polling in a dead-end loop:
   Task: <description>
   Error: <details>
   ```
+
+---
+
+## 🏛️ Standardized Antigravity Plugin Architecture
+
+This plugin strictly complies with Google Antigravity's official plugin filesystem specification:
+
+```text
+plugins/telegram-nexus-plugin/
+├── plugin.json         # Required manifest declaring plugin, version & discovery metadata
+├── mcp_config.json     # Portable MCP server definition for telegram-nexus
+├── rules/              # Ambient operational rules injected when plugin is active
+│   └── AGENTS.md       # Consolidated lightweight rules (Spacious Card Standard & Threading)
+├── agents/             # Dedicated autonomous subagent definitions
+│   └── telegram_nexus.md # Sovereign Master Dispatcher & Non-Blocking Async Agent
+├── skills/             # On-demand progressive disclosure skills
+│   └── telegram-nexus/
+│       └── SKILL.md    # Multi-step command runbook & operational workflows
+├── mcp/                # Pure Python stdio MCP server implementation
+│   └── server.py       # JSON-RPC server with fast-path heuristics & slash handlers
+├── scripts/            # Autonomous event triggers & sentinel daemons
+│   ├── listener.py     # Continuous loop controller & telemetry monitor
+│   └── poll_wait.py    # Zero-token reactive trigger (holds long-poll socket)
+├── assets/             # Media assets, hero card logos & badges
+│   └── nexus_logo.jpg
+├── README.md           # Sovereign dual-audience documentation
+└── SECURITY.md         # OpenSSF-aligned security policy & threat model
+```
 
 ---
 

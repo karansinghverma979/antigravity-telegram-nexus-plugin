@@ -88,14 +88,14 @@ When `poll_wait.py` finishes, Antigravity triggers a `<SYSTEM_MESSAGE>` with one
 #### A. `OWNER_MESSAGES` (One or more messages from Karan):
 Iterate through **every message** in `payload["messages"]`:
 
-- **Case 1: Fast-Path Queries (<2s)**
-  *(Conversational questions, battery/RAM status, strikes check, thoughts/sparks, quick math, explanations)*:
-  - Formulate direct, high-density answer formatted with the **Spacious Card Standard**.
+- **Case 1: Fast-Path Queries (`msg.get("is_fast_path") == True` or simple command)**
+  *(Conversational questions, battery/RAM status, /ping latency, strikes check, thoughts/sparks, quick math, explanations)*:
+  - Formulate direct, high-density answer formatted with the **Spacious Card Standard** (double-spaced, dividers, strict entity escaping `&amp;` / `&lt;`).
   - Dispatch immediately to Telegram via `nexus_send_alert`:
     - `message`: Formatted card text
     - `reply_to_message_id`: `msg["message_id"]` *(Native message bubble reply!)*
 
-- **Case 2: Slow-Path Heavy Jobs**
+- **Case 2: Slow-Path Heavy Jobs (`msg.get("is_fast_path") == False` or complex instruction)**
   *(Code writing, multi-file refactoring, research surveys, `/genimage`, `/gendoc`, system audits)*:
   1. Create job ticket via `nexus_job_create`:
      - `task`: High-clarity description of the work

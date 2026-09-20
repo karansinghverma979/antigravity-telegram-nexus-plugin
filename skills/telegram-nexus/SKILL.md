@@ -144,11 +144,19 @@ Use this skill whenever Karan invokes `/nexus`, `/telegram`, or needs to manage 
 | Mobile Slash Command | Speed / Path | Specialized Execution |
 | :--- | :--- | :--- |
 | **`/start`** / **`/help`** | Fast Path (<0.1s) | Returns interactive Command Palette & executive guide |
+| **`/ping`** | Fast Path (<0.1s) | Latency benchmark test $\rightarrow$ returns instant pong & connection health |
+| **`/joblist`** (or `/jobs`) | Fast Path (<0.1s) | Lists active background worker queue & recent job ticket dossiers |
+| **`/jobstatus <id>`** | Fast Path (<0.1s) | Detailed dossier of specific job ticket (e.g. `/jobstatus JOB-01`) |
+| **`/jobcancel <id>`** | Fast Path (<0.1s) | Terminate and mark an in-progress job ticket as aborted |
 | **`/status`** | Fast Path (<0.1s) | Dispatches Motobook battery, RAM & gateway telemetry |
 | **`/strike`** | Fast Path (<0.1s) | Queries `campaigns.sqlite` strikes table $\rightarrow$ returns today's strike checklist |
 | **`/task`** | Fast Path (<0.1s) | Queries active campaigns & operations tree from `campaigns.sqlite` |
-| **`/job`** | Fast Path (<0.1s) | Lists active and completed asynchronous background worker tickets |
 | **`/spark <note>`** | Fast Path (<0.1s) | Appends note to `~/.gemini/Spark.md` and attaches `⚡` reaction |
 | **`/genimage <prompt>`** | Slow Path (`JOB-XX`) | Generates AI visual on Motobook $\rightarrow$ delivers via `nexus_send_photo` |
 | **`/gendoc <ext> <topic>`** | Slow Path (`JOB-XX`) | Generates `.md`/`.txt`/`.csv` document $\rightarrow$ delivers via `nexus_send_document` |
 | **`/stop`** | Control Path | Halts the active polling trigger cleanly |
+
+### 3. Swipe-Reply Quick Actions (Natural Language Shortcuts)
+- Reply to any `[JOB-XX]` card with **`status`** / **`info`** / **`check`** $\rightarrow$ Instant job dossier
+- Reply to any `[JOB-XX]` card with **`cancel`** / **`stop`** / **`kill`** $\rightarrow$ Terminate the ticket immediately
+
