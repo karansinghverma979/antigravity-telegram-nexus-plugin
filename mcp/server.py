@@ -130,6 +130,7 @@ def ensure_bot_commands():
         {"command": "genimage", "description": "Generate AI visual on Motobook & deliver"},
         {"command": "gendoc", "description": "Generate document & send file to phone"},
         {"command": "gsuite", "description": "Query Gmail, Calendar, Drive & Docs"},
+        {"command": "ping", "description": "Test gateway latency — instant pong!"},
         {"command": "help", "description": "View sovereign executive command palette"}
     ]
     try:
@@ -853,6 +854,18 @@ def tool_poll_updates(args: dict) -> dict:
                 tool_send_alert({"chat_id": chat_id, "message": status_card, "reply_to_message_id": msg_id})
                 continue
 
+            elif cmd_lower.startswith("/ping"):
+                t_start = time.time()
+                # Round-trip latency: send → Telegram ACK
+                pong_msg = (
+                    "🏓 <b>PONG</b>\n\n"
+                    f"⚡ <b>Gateway Latency:</b> <code>{int((time.time() - t_start) * 1000)}ms</code>\n\n"
+                    "───────────────\n\n"
+                    "🌐 <b>Status:</b> Motobook online & reactive"
+                )
+                tool_send_alert({"chat_id": chat_id, "message": pong_msg, "reply_to_message_id": msg_id})
+                continue
+
             elif cmd_lower.startswith(("/joblist", "/jobs")) or cmd_lower == "/job":
                 jobs = load_jobs()
                 card = render_job_list(jobs)
@@ -909,6 +922,10 @@ def tool_poll_updates(args: dict) -> dict:
                     SPARK_PATH.parent.mkdir(parents=True, exist_ok=True)
                     with open(SPARK_PATH, "a", encoding="utf-8") as f:
                         f.write(spark_text)
+                    # Also append to spark_queue.jsonl for nexus_ingest_spark pickup
+                    SPARK_QUEUE_PATH = LOG_DIR / "spark_queue.jsonl"
+                    with open(SPARK_QUEUE_PATH, "a", encoding="utf-8") as fq:
+                        fq.write(json.dumps({"text": note, "ts": now_str}, ensure_ascii=False) + "\n")
                     record_audit_event("SPARK_INGEST", "owner", chat_id, "Spark ingested via /spark command", {"note": note})
                     tool_send_alert({
                         "chat_id": chat_id,
@@ -916,6 +933,7 @@ def tool_poll_updates(args: dict) -> dict:
                         "reply_to_message_id": msg_id
                     })
                 continue
+
 
             elif cmd_lower.startswith("/strike"):
                 import sqlite3
@@ -1000,24 +1018,62 @@ def tool_poll_updates(args: dict) -> dict:
             except Exception as e:
                 record_audit_event("MEDIA_AUTO_DOWNLOAD_ERR", "system", chat_id, f"Auto download error: {str(e)}")
 
-        processed_messages.append({
+        # ── Fast-Path Classifier: tag without burning agent reasoning tokens ──────
+        # Fast-path: short text, no media, no heavy keywords → agent replies instantly
+        # Slow-path: media/voice, or heavy keywords like generate/write/research/audit
+        SLOW_KEYWORDS = {
+            "generate", "generat", "write", "research", "code", "create", "build",
+            "analyse", "analyze", "audit", "report", "summarize", "summarise",
+            "convert", "refactor", "debug", "fix", "explain", "compare",
+            "download", "extract", "scrape", "design", "plan", "draft"
+        }
+        text_lower = (text or "").lower()
+        has_heavy_keyword = any(kw in text_lower for kw in SLOW_KEYWORDS)
+        is_fast_path = (
+            media_type == "text"
+            and len(text or "") < 200
+            and not has_heavy_keyword
+        )
+
+        # ── Slim message dict: only include non-null/non-empty/non-default fields ──
+        msg_entry = {
             "message_id": msg.get("message_id"),
-            "update_id": up_id,
-            "chat_id": chat_id,
-            "sender_name": sender_name,
-            "sender_username": sender_username,
             "text": text,
             "media_type": media_type,
-            "file_id": file_id,
-            "local_file_path": local_file_path,
-            "duration": duration,
-            "date": msg.get("date"),
-            "is_owner": True,
-            "reply_to_message_id": reply_to.get("message_id") if reply_to else None,
-            "reply_context": reply_context,
-            "referenced_job_id": referenced_job_id
-        })
+            "is_fast_path": is_fast_path,
+        }
+        # Only include optional fields when they carry real data
+        if local_file_path:
+            msg_entry["local_file_path"] = local_file_path
+        if reply_to:
+            msg_entry["reply_to_message_id"] = reply_to.get("message_id")
+        if referenced_job_id:
+            msg_entry["referenced_job_id"] = referenced_job_id
+        if duration:
+            msg_entry["duration"] = duration
+
+        processed_messages.append(msg_entry)
     
+    # ── Stale Job Auto-Sweep: mark in_progress jobs >2h as stale/failed ───────────
+    try:
+        jobs = load_jobs()
+        now_epoch = time.time()
+        stale_updated = False
+        for j_id, j in jobs.items():
+            if j.get("status") == "in_progress":
+                created_epoch = j.get("created_at_epoch", 0)
+                if created_epoch and (now_epoch - created_epoch) > 7200:  # 2 hours
+                    j["status"] = "failed"
+                    j["error"] = "Auto-expired: exceeded 2-hour stale threshold. Worker likely crashed."
+                    j["completed_at"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
+                    j["completed_at_epoch"] = now_epoch
+                    stale_updated = True
+                    record_audit_event("JOB_STALE_EXPIRED", "system", "auto", f"Auto-expired stale job {j_id}")
+        if stale_updated:
+            save_jobs(jobs)
+    except Exception:
+        pass
+
     # ── CRITICAL: Only persist the offset in real (non-dry_run) mode ──────────────
     # In dry_run mode (used by poll_wait.py trigger), we DETECT messages without
     # consuming them. The agent's subsequent real nexus_poll_updates call will see
@@ -1036,16 +1092,36 @@ def tool_poll_updates(args: dict) -> dict:
     }
 
 def tool_ingest_spark(args: dict) -> dict:
-    """Pull unhandled thoughts sent by Karan on Telegram and append directly to Spark.md."""
-    poll_res = tool_poll_updates({"limit": 50})
-    if not poll_res.get("ok"):
-        return poll_res
+    """Pull unhandled thoughts sent by Karan on Telegram and append directly to Spark.md.
     
-    messages = poll_res.get("messages", [])
-    owner_notes = [m for m in messages if m.get("is_owner") and m.get("text") and not m.get("text").startswith("/")]
+    DESIGN: Reads from a dedicated spark_queue.jsonl file that the bot writes to when
+    the /spark command is used. Does NOT call tool_poll_updates (which would eat the offset).
+    """
+    SPARK_QUEUE_PATH = LOG_DIR / "spark_queue.jsonl"
+    
+    if not SPARK_QUEUE_PATH.exists():
+        return {"status": "noop", "message": "No queued Spark thoughts found.", "count": 0}
+    
+    try:
+        with open(SPARK_QUEUE_PATH, "r", encoding="utf-8") as f:
+            raw_lines = [l.strip() for l in f.readlines() if l.strip()]
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    
+    if not raw_lines:
+        return {"status": "noop", "message": "No queued Spark thoughts found.", "count": 0}
+    
+    owner_notes = []
+    for line in raw_lines:
+        try:
+            entry = json.loads(line)
+            if entry.get("text"):
+                owner_notes.append(entry)
+        except Exception:
+            pass
     
     if not owner_notes:
-        return {"status": "noop", "message": "No new personal notes found from Telegram owner.", "count": 0}
+        return {"status": "noop", "message": "No valid Spark thoughts in queue.", "count": 0}
     
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
     new_spark_lines = [f"\n---", f"### {now_str} (via Telegram Nexus)"]
@@ -1057,6 +1133,10 @@ def tool_ingest_spark(args: dict) -> dict:
     with open(SPARK_PATH, "a", encoding="utf-8") as f:
         f.write("\n".join(new_spark_lines))
     
+    # Clear the queue after successful ingestion
+    SPARK_QUEUE_PATH.unlink(missing_ok=True)
+    
+    cfg = load_config()
     record_audit_event(
         "SPARK_INGEST",
         "owner",

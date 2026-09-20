@@ -101,9 +101,30 @@ def run_trigger():
                     res = server.tool_poll_updates({"timeout": 20, "dry_run": True})
                     if res.get("ok"):
                         messages = res.get("messages", [])
-                        owner_msgs = [m for m in messages if m.get("is_owner")]
+                        # All returned messages are from owner (non-owner blocked at gate)
+                        # is_owner field removed from slim payload — presence = owner
+                        owner_msgs = messages  # All passed gating = owner messages
                         if owner_msgs:
-                            # Real message received from Karan! Exit immediately to trigger agent wakeup
+                            # Fire typing indicator + ⚡ reaction BEFORE waking agent
+                            # This gives instant visual feedback while agent boots (~3-5s)
+                            try:
+                                cfg = server.load_config()
+                                chat_id = cfg.get("owner_chat_id", "")
+                                if chat_id:
+                                    server.telegram_api_call("sendChatAction", {
+                                        "chat_id": chat_id, "action": "typing"
+                                    })
+                                    # React to first message with ⚡
+                                    first_msg_id = owner_msgs[0].get("message_id")
+                                    if first_msg_id:
+                                        server.telegram_api_call("setMessageReaction", {
+                                            "chat_id": chat_id,
+                                            "message_id": first_msg_id,
+                                            "reaction": [{"type": "emoji", "emoji": "⚡"}]
+                                        })
+                            except Exception:
+                                pass
+                            # Exit to wake agent
                             payload = {
                                 "event": "OWNER_MESSAGES",
                                 "count": len(owner_msgs),
