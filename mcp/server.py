@@ -24,8 +24,10 @@ import traceback
 import re
 from pathlib import Path
 
-# Quarantined configuration file outside git-tracked repositories
-CONFIG_PATH = Path(os.path.expanduser("~/.gemini/config/telegram_config.json"))
+# Centralized Credential Vault (canonical) → Legacy fallback
+VAULT_CONFIG_PATH = Path(os.path.expanduser("~/.gemini/credentials/telegram-nexus/config.json"))
+LEGACY_CONFIG_PATH = Path(os.path.expanduser("~/.gemini/config/telegram_config.json"))
+CONFIG_PATH = VAULT_CONFIG_PATH if VAULT_CONFIG_PATH.exists() else LEGACY_CONFIG_PATH
 SPARK_PATH = Path(os.path.expanduser("~/.gemini/Spark.md"))
 MEDIA_DIR = Path(os.path.expanduser("~/.gemini/media"))
 LOG_DIR = Path(os.path.expanduser("~/.gemini/logs"))
@@ -85,15 +87,23 @@ def load_config() -> dict:
     }
 
 def save_config(cfg: dict):
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+    # Write to vault (canonical)
+    VAULT_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(VAULT_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
+    # Sync to legacy path for backward compatibility
+    try:
+        LEGACY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(LEGACY_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        pass
 
 def telegram_api_call(method: str, params: dict = None) -> dict:
     cfg = load_config()
     token = cfg.get("bot_token")
     if not token:
-        raise ValueError("TELEGRAM_BOT_TOKEN is not configured in ~/.gemini/config/telegram_config.json")
+        raise ValueError("TELEGRAM_BOT_TOKEN is not configured in ~/.gemini/credentials/telegram-nexus/config.json")
     
     url = f"https://api.telegram.org/bot{token}/{method}"
     data = None
@@ -350,7 +360,7 @@ def tool_get_status(args: dict) -> dict:
     if not token:
         return {
             "status": "unconfigured",
-            "message": "Bot token not set. Configure bot_token in ~/.gemini/config/telegram_config.json",
+            "message": "Bot token not set. Configure bot_token in ~/.gemini/credentials/telegram-nexus/config.json",
             "owner_bound": bool(owner_id)
         }
     
@@ -1854,7 +1864,7 @@ TOOLS = [
     },
     {
         "name": "nexus_configure",
-        "description": "Configure bot token and/or owner chat ID in ~/.gemini/config/telegram_config.json.",
+        "description": "Configure bot token and/or owner chat ID in ~/.gemini/credentials/telegram-nexus/config.json.",
         "inputSchema": {
             "type": "object",
             "properties": {
