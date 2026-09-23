@@ -241,6 +241,29 @@ Rather than burning tokens on empty polling loops or polling in a dead-end loop:
 
 ---
 
+## ⚡ Dual-Gear Architecture: Automated Loop vs. Instant Pull
+
+Telegram Nexus is engineered with two distinct operational gears to keep continuous background listening strictly separated from on-demand manual intake:
+
+| Operational Gear | Activation Command | Mechanics | Zero-Re-Arming? | Use Case |
+| :--- | :--- | :--- | :--- | :--- |
+| **🛰️ Gear 1: Ambient Sentinel** | `/telegram-nexus start` | Launches `poll_wait.py` in background; wakes live agent reactively on incoming messages | ❌ (Mandatory re-arming in same turn) | Hands-free mobile C2 away from workstation |
+| **⚡ Gear 2: Instant Pull** | `/telegram-nexus pull`<br>`/telegram-nexus direct`<br>`python scripts/listener.py --pull` | Synchronous one-shot intake; checks Telegram immediately; processes text or media; exits | ✅ (Zero re-arming, 0 background tasks) | Working at laptop, pulling a photo, note, or prompt on-demand |
+
+### Key Invariants of Instant Pull Mode (`/telegram-nexus pull` / `direct`):
+1. **100% Nexus Functional Parity**: Executes the **exact same pipeline** as the automated Nexus Dispatcher:
+   - Same task execution, fast/slow-path job ticketing (`JOB-XX`), and Spark ingestion.
+   - Same **Spacious Card Standard** replies delivered directly to your Telegram chat.
+   - Same native Telegram message bubble quoting (`reply_to_message_id`).
+   - Same autonomous multimodal `view_file` visual inspection for photos/documents.
+   - Same immutable audit logging to `~/.gemini/logs/telegram_nexus.log` and `.jsonl`.
+2. **The Single and Only Difference**: Runs a **one-time poll/check** and **NEVER launches or re-arms `poll_wait.py`**.
+3. **Zero Arguments Required**: Never requires passing message IDs or offsets. Automatically fetches pending items for the bound owner.
+4. **Automatic Offset Advancement**: Consumed messages advance `last_update_id` in `config.json` so the automated daemon loop will never see duplicates if started later.
+5. **Clean Exit**: Releases the thread immediately with zero active background processes.
+
+---
+
 ## 🏛️ Standardized Antigravity Plugin Architecture
 
 This plugin strictly complies with Google Antigravity's official plugin filesystem specification:

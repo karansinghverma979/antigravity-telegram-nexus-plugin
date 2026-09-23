@@ -77,6 +77,40 @@ def stop_listener():
             pass
     print("✅ Telegram Nexus Listener stopped and PID released.", flush=True)
 
+def pull_direct():
+    """Execute a zero-argument, one-shot manual intake pass.
+    
+    Fetches any pending text messages, notes, photos, or documents from Karan without
+    starting or re-arming any background daemon loop.
+    """
+    print("⚡ Telegram Nexus: Checking for new messages (One-Shot Direct Intake)...", flush=True)
+    try:
+        res = server.tool_poll_updates({"timeout": 0, "dry_run": False})
+        if not res.get("ok"):
+            print(f"❌ Pull failed: {res.get('message', 'Unknown error')}")
+            return
+
+        messages = res.get("messages", [])
+        if not messages:
+            print("📭 Zero new messages on Telegram (Queue empty).", flush=True)
+            return
+
+        print(f"📥 Pulled {len(messages)} new item(s) from Telegram:\n", flush=True)
+        for idx, m in enumerate(messages, 1):
+            msg_id = m.get("message_id")
+            mtype = m.get("media_type", "text")
+            text = m.get("text", "")
+            local_path = m.get("local_file_path", "")
+
+            print(f"[{idx}] 💬 Message ID: {msg_id} | Type: {mtype.upper()}")
+            if text:
+                print(f"    Content: {text}")
+            if local_path:
+                print(f"    Media  : {local_path}")
+            print()
+    except Exception as e:
+        print(f"❌ Error during direct pull: {e}", flush=True)
+
 def test_connection():
     """Verify bot token validity, owner binding, and Telegram API responsiveness."""
     print("🔍 Testing Telegram API connectivity...", flush=True)
@@ -99,11 +133,14 @@ def run_dashboard():
     print("│    inside your active Antigravity session (agy terminal).   │")
     print("│                                                             │")
     print("│ 🚀 Usage in agy:                                            │")
+    print("│    /telegram-nexus pull   -> One-shot check (text/media, no loop)│")
+    print("│    /telegram-nexus direct -> Alias for /telegram-nexus pull     │")
     print("│    /telegram-nexus start  -> Start live in-session listener │")
     print("│    /telegram-nexus stop   -> Stop in-session listener       │")
     print("│    /telegram-nexus status -> View live gateway telemetry    │")
     print("│                                                             │")
     print("│ ⚙️ CLI Flags:                                               │")
+    print("│    --pull / --direct      -> One-shot intake (text/media)   │")
     print("│    --status               -> Check running state & jobs     │")
     print("│    --stop                 -> Halt background trigger cleanly│")
     print("│    --test                 -> Test bot token & API link      │")
@@ -113,13 +150,16 @@ def run_dashboard():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Telegram Nexus Sovereign Controller & Sentinel")
+    parser.add_argument("--pull", "--direct", dest="pull", action="store_true", help="One-shot manual intake check for text or media (no background loop)")
     parser.add_argument("--status", action="store_true", help="Check listener status & job telemetry")
     parser.add_argument("--stop", action="store_true", help="Stop running listener cleanly")
     parser.add_argument("--test", action="store_true", help="Test bot token and Telegram API connectivity")
     parser.add_argument("--trigger", action="store_true", help="Run single reactive trigger cycle")
     args = parser.parse_args()
 
-    if args.status:
+    if args.pull:
+        pull_direct()
+    elif args.status:
         get_status()
     elif args.stop:
         stop_listener()

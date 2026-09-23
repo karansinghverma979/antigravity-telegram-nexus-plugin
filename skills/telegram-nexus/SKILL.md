@@ -22,16 +22,29 @@ Use this skill whenever Karan invokes `/nexus`, `/telegram`, or needs to manage 
   - Any message from a non-owner `chat_id` is immediately rejected with an access-denied security notice and discarded.
   - Zero visitor queue, zero visitor interaction, and zero public exposure.
 
-### 2. ⚡ Simultaneous Multi-Command & Non-Blocking Reactive Loop
-* **Zero Socket Blocking**:
-  - The reactive trigger script runs silently in the background:
-    ```pwsh
-    python "$HOME/.gemini/config/plugins/telegram-nexus-plugin/scripts/poll_wait.py"
-    ```
-  - **0 tokens burned** during waiting.
-  - The moment Karan sends a message (or multiple messages), `poll_wait.py` outputs the batch and exits with code 0.
-  - Antigravity catches the completion event and **instantly wakes up the live agent in the terminal window**!
-* **Non-Blocking Job Triage**:
+### 2. ⚡ Dual-Gear Architecture: Automated Loop vs. Instant Pull
+Telegram Nexus provides two dedicated operational gears engineered to keep the background daemon completely separate from manual one-shot requests:
+
+* **🛰️ Gear 1: Ambient Sentinel (Automated Reactive Loop)**:
+  - Invoked via: `/telegram-nexus start`
+  - Background trigger runs silently: `python "$HOME/.gemini/config/plugins/telegram-nexus-plugin/scripts/poll_wait.py"`
+  - **The Sacred Re-Arming Invariant**: In this mode, the agent *must* re-arm `poll_wait.py` at the end of every active turn.
+  - Hands-free, autonomous mobile C2 away from the laptop desk.
+
+* **⚡ Gear 2: Instant Pull / Direct Mode (One-Shot Manual Intake)**:
+  - Invoked via: `/telegram-nexus pull` or `/telegram-nexus direct` (CLI: `python listener.py --pull`)
+  - **100% Behavioral & Action Parity**: The agent performs the **exact same actions** as the standard Nexus Dispatcher:
+    - Same task running and reasoning workflows.
+    - Same replying & message formatting (**Spacious Card Standard** with double spacing, dividers, and safe entity escaping).
+    - Same native Telegram message threading quoting `reply_to_message_id`.
+    - Same autonomous multimodal intake and inspection via `view_file`.
+    - Same audit logging to `~/.gemini/logs/telegram_nexus.log` and `.jsonl`.
+  - **The One and Only Difference**: Gear 2 performs a **one-time poll/check** and **NEVER launches or re-arms `poll_wait.py`**.
+  - **Zero Arguments Required**: Automatically fetches pending text messages, thoughts, or multimodal media for the authenticated owner without needing message IDs or offsets.
+  - **Automatic Offset Advancement**: Advances `last_update_id` cleanly in `config.json` so messages consumed during a manual pull will never be re-processed by the automated loop later.
+  - Terminates cleanly in the active turn with **zero background processes**.
+
+* **Non-Blocking Job Triage (Gear 1)**:
   - For fast queries: Reply immediately.
   - For heavy jobs:
     1. Create job ticket via `nexus_job_create` with `original_message_id`.
@@ -130,6 +143,8 @@ Use this skill whenever Karan invokes `/nexus`, `/telegram`, or needs to manage 
 
 | Command / Shorthand | Target Action | Underlying Mechanism |
 | :--- | :--- | :--- |
+| **`/telegram-nexus pull`** | One-shot manual check for pending text or media (zero loop) | `python listener.py --pull` or `nexus_poll_updates(timeout=0)` |
+| **`/telegram-nexus direct`** | Direct alias for `/telegram-nexus pull` (zero arguments required) | `python listener.py --direct` |
 | **`/telegram-nexus start`** | Start live reactive trigger loop in active session | Launches `poll_wait.py` with Sacred Re-Arming |
 | **`/telegram-nexus stop`** | Stop live loop and release polling socket | Flags `STOP_FILE` & releases PID |
 | **`/telegram-nexus status`** | Check bot connection, trigger state, and active jobs | `python listener.py --status` |

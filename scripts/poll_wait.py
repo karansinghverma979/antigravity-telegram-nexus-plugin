@@ -59,6 +59,9 @@ def run_trigger():
     with open(PID_FILE, "w", encoding="utf-8") as f:
         f.write(str(os.getpid()))
 
+    # Exponential backoff state: reset on clean poll, grows on errors (2→4→8→…60s max)
+    _err_backoff = 2
+
     try:
         while True:
             try:
@@ -100,6 +103,8 @@ def run_trigger():
                 try:
                     res = server.tool_poll_updates({"timeout": 20, "dry_run": True})
                     if res.get("ok"):
+                        # Successful poll → reset error backoff counter
+                        _err_backoff = 2
                         messages = res.get("messages", [])
                         # All returned messages are from owner (non-owner blocked at gate)
                         # is_owner field removed from slim payload — presence = owner
@@ -135,9 +140,14 @@ def run_trigger():
                     else:
                         err = res.get("error", "")
                         if "409" in str(err):
-                            time.sleep(2)
-                except Exception as e:
-                    time.sleep(2)
+                            # Conflict — another instance already holds the socket
+                            # Use exponential backoff, not flat sleep, to avoid hammering
+                            time.sleep(min(_err_backoff, 60))
+                            _err_backoff = min(_err_backoff * 2, 60)
+                except Exception:
+                    # Network / timeout error → exponential backoff (2→4→8→…60s)
+                    time.sleep(min(_err_backoff, 60))
+                    _err_backoff = min(_err_backoff * 2, 60)
 
                 # Brief socket rest between empty cycles
                 time.sleep(0.3)
